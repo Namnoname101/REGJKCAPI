@@ -1,0 +1,118 @@
+﻿[
+  {
+    "Tag": "div",
+    "Role": "dialog",
+    "ClassName": "v--modal-box v--modal",
+    "Text": "Juventus FC \u0026 KJC \u0110\u1ED1i T\u00E1c Ch\u00EDnh Th\u1EE9c N\u0103m 2025-2026 \u002B 84 T\u00F4i \u0111\u00E3 \u0111\u1EE7 tu\u1ED5i v\u00E0 \u0111\u1ED3ng \u00FD\u201CCh\u00EDnh s\u00E1ch th\u00E0nh vi\u00EAn\u201D \u0110\u0102NG K\u00DD Qu\u00FD kh\u00E1ch \u0111\u00E3 c\u00F3 t\u00E0i kho\u1EA3n? [",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2)",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "div",
+    "ClassName": "popup_modal_wrap hasBg registerModal",
+    "Text": "Juventus FC \u0026 KJC \u0110\u1ED1i T\u00E1c Ch\u00EDnh Th\u1EE9c N\u0103m 2025-2026 \u002B 84 T\u00F4i \u0111\u00E3 \u0111\u1EE7 tu\u1ED5i v\u00E0 \u0111\u1ED3ng \u00FD\u201CCh\u00EDnh s\u00E1ch th\u00E0nh vi\u00EAn\u201D \u0110\u0102NG K\u00DD Qu\u00FD kh\u00E1ch \u0111\u00E3 c\u00F3 t\u00E0i kho\u1EA3n? [",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "div",
+    "ClassName": "popup_modal_close registerModal",
+    "Text": "\u0110\u00F3ng",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(1)",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "input",
+    "Name": "username",
+    "Type": "text",
+    "Placeholder": "T\u00EAn ng\u01B0\u1EDDi d\u00F9ng",
+    "ClassName": "username_input",
+    "Text": "",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(2) \u003E form \u003E div:nth-of-type(1) \u003E div:nth-of-type(1) \u003E input[name=\u0022username\u0022]",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "input",
+    "Name": "password",
+    "Type": "password",
+    "Placeholder": "M\u1EADt kh\u1EA9u",
+    "ClassName": "password_input",
+    "Text": "",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(2) \u003E form \u003E div:nth-of-type(2) \u003E div:nth-of-type(1) \u003E input[name=\u0022password\u0022]",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "input",
+    "Name": "mobileNum",
+    "Type": "text",
+    "Placeholder": "S\u1ED1 \u0111i\u1EC7n tho\u1EA1i",
+    "ClassName": "phone_input",
+    "Text": "",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(2) \u003E form \u003E div:nth-of-type(3) \u003E div:nth-of-type(1) \u003E input[name=\u0022mobileNum\u0022]",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "input",
+    "Name": "payeeName",
+    "Type": "text",
+    "Placeholder": "H\u1ECD v\u00E0 t\u00EAn",
+    "ClassName": "payeeName_input",
+    "Text": "",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(2) \u003E form \u003E div:nth-of-type(4) \u003E div:nth-of-type(1) \u003E input[name=\u0022payeeName\u0022]",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "input",
+    "Name": "termCheck",
+    "Type": "checkbox",
+    "ClassName": "remPass_checkbox",
+    "Text": "on",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(2) \u003E form \u003E div:nth-of-type(5) \u003E div \u003E div \u003E input[name=\u0022termCheck\u0022]",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "button",
+    "Type": "submit",
+    "ClassName": "submit_btn trigger-shine-2",
+    "Text": "\u0110\u0102NG K\u00DD",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(2) \u003E form \u003E div:nth-of-type(6) \u003E button:nth-of-type(1)",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "button",
+    "Type": "button",
+    "ClassName": "reset-btn",
+    "Text": "Nh\u1EADp l\u1EA1i",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(2) \u003E form \u003E div:nth-of-type(6) \u003E button:nth-of-type(2)",
+    "Visible": false,
+    "Enabled": true,
+    "Data": {}
+  },
+  {
+    "Tag": "a",
+    "ClassName": "login-btn",
+    "Text": "[\u0110\u0102NG NH\u1EACP]",
+    "CssPath": "div:nth-of-type(1) \u003E span \u003E div:nth-of-type(1) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div:nth-of-type(2) \u003E div \u003E div \u003E div:nth-of-type(2) \u003E div:nth-of-type(3) \u003E a",
+    "Visible": true,
+    "Enabled": true,
+    "Data": {}
+  }
+]

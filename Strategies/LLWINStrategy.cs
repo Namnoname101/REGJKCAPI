@@ -1,0 +1,41 @@
+using OpenQA.Selenium;
+using System;
+using System.Threading.Tasks;
+using VibecodeReg.Core;
+using VibecodeReg.Models;
+
+namespace VibecodeReg.Strategies;
+
+public sealed class LLWINStrategy : ISiteAutomationStrategy
+{
+    private const string TargetUrl = "https://llwin.app/?id=924999213&fixed.iswebclip=2";
+
+    public bool ExecuteRegistration(
+        IWebDriver driver,
+        AccountModel account,
+        SiteRunModel siteRun,
+        AutomationExecutionContext executionContext)
+    {
+        executionContext.Checkpoint();
+        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Opening registration page...");
+        driver.Navigate().GoToUrl(TargetUrl);
+
+        // TODO: Fill LLWIN registration fields after the target HTML DOM is available.
+        executionContext.Delay(TimeSpan.FromSeconds(2));
+        return true;
+    }
+
+    public bool ExecuteBankSetup(
+        IWebDriver driver,
+        AccountModel account,
+        SiteRunModel siteRun,
+        AutomationExecutionContext executionContext)
+    {
+        executionContext.Checkpoint();
+        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Preparing bank setup...");
+
+        // TODO: Fill LLWIN bank setup fields after the target HTML DOM is available.
+        executionContext.Delay(TimeSpan.FromSeconds(2));
+        return true;
+    }
+}

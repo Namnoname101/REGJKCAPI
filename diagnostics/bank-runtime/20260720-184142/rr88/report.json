@@ -1,0 +1,56 @@
+﻿{
+  "Site": "RR88",
+  "TargetUrl": "http://gioithieu.rr3311.com/?referralCode=mrh6472",
+  "ProfileFolder": "Profiles\\0600221d31a848a2af7d030dc67c39f4\\RR88",
+  "StartedAt": "2026-07-20T18:41:42.1158738+07:00",
+  "FinishedAt": "2026-07-20T18:42:01.8253809+07:00",
+  "Accessible": true,
+  "AuthenticatedLikely": false,
+  "CaptchaOrOtpBlocker": true,
+  "BankNavigationAttempted": false,
+  "BankFormLikely": false,
+  "AfterOpen": {
+    "Stage": "01-after-open",
+    "CapturedAt": "2026-07-20T18:41:47.4291046+07:00",
+    "Url": "https://www.rr3311.com/register",
+    "Title": "TRANG CH\u1EE6 CH\u00CDNH TH\u1EE8C RR88",
+    "SourceFile": "01-after-open.html",
+    "ScreenshotFile": "01-after-open.png",
+    "ElementsFile": "01-after-open.elements.json",
+    "Iframes": [
+      {
+        "Index": 0,
+        "Name": "a-csirglxlrvkq",
+        "Src": "https://www.google.com/recaptcha/api2/anchor?ar=1\u0026k=6LcMZR0UAAAAALgPMcgHwga7gY5p8QMg1Hj-bmUv\u0026co=aHR0cHM6Ly93d3cucnIzMzExLmNvbTo0NDM.\u0026hl=en\u0026v=A7KpaEASfhDcK0nXxgQEyyYv\u0026size=invisible\u0026anchor-ms=20000\u0026execute-ms=30000\u0026cb=5625srjgt2tu",
+        "Title": "reCAPTCHA",
+        "Visible": false
+      }
+    ],
+    "FrameFiles": [
+      {
+        "Index": 0,
+        "Src": "https://www.google.com/recaptcha/api2/anchor?ar=1\u0026k=6LcMZR0UAAAAALgPMcgHwga7gY5p8QMg1Hj-bmUv\u0026co=aHR0cHM6Ly93d3cucnIzMzExLmNvbTo0NDM.\u0026hl=en\u0026v=A7KpaEASfhDcK0nXxgQEyyYv\u0026size=invisible\u0026anchor-ms=20000\u0026execute-ms=30000\u0026cb=5625srjgt2tu",
+        "SourceFile": "01-after-open.frame-0.html",
+        "ElementsFile": "01-after-open.frame-0.elements.json"
+      }
+    ],
+    "Elements": [],
+    "AuthenticatedSignals": [],
+    "Blockers": [
+      "Captcha/Geetest signal found in DOM.",
+      "OTP/verification-code signal found in DOM."
+    ],
+    "AuthenticatedLikely": false,
+    "BlockerLikely": true
+  },
+  "AuthenticatedSignals": [],
+  "BankContainerSelectors": [],
+  "BankFormFields": [],
+  "SubmitSelectors": [],
+  "FailureSelectors": [],
+  "Blockers": [
+    "Captcha/Geetest signal found in DOM.",
+    "OTP/verification-code signal found in DOM.",
+    "No visible bank/account/wallet navigation candidate found in default document."
+  ]
+}

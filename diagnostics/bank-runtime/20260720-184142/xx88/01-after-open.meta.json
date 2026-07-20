@@ -1,0 +1,33 @@
+﻿{
+  "Stage": "01-after-open",
+  "CapturedAt": "2026-07-20T18:42:22.0405467+07:00",
+  "Url": "https://www.xx88.fun/register?referralCode=gql2969\u0026affiliateCode=gioithieu",
+  "Title": "XX88",
+  "SourceFile": "01-after-open.html",
+  "ScreenshotFile": "01-after-open.png",
+  "ElementsFile": "01-after-open.elements.json",
+  "Iframes": [
+    {
+      "Index": 0,
+      "Name": "a-phkoce5ihurg",
+      "Src": "https://www.google.com/recaptcha/api2/anchor?ar=1\u0026k=6LcMZR0UAAAAALgPMcgHwga7gY5p8QMg1Hj-bmUv\u0026co=aHR0cHM6Ly93d3cueHg4OC5mdW46NDQz\u0026hl=en\u0026v=A7KpaEASfhDcK0nXxgQEyyYv\u0026size=invisible\u0026anchor-ms=20000\u0026execute-ms=30000\u0026cb=5e6krf7w9uoi",
+      "Title": "reCAPTCHA",
+      "Visible": false
+    }
+  ],
+  "FrameFiles": [
+    {
+      "Index": 0,
+      "Src": "https://www.google.com/recaptcha/api2/anchor?ar=1\u0026k=6LcMZR0UAAAAALgPMcgHwga7gY5p8QMg1Hj-bmUv\u0026co=aHR0cHM6Ly93d3cueHg4OC5mdW46NDQz\u0026hl=en\u0026v=A7KpaEASfhDcK0nXxgQEyyYv\u0026size=invisible\u0026anchor-ms=20000\u0026execute-ms=30000\u0026cb=5e6krf7w9uoi",
+      "SourceFile": "01-after-open.frame-0.html",
+      "ElementsFile": "01-after-open.frame-0.elements.json"
+    }
+  ],
+  "Elements": [],
+  "AuthenticatedSignals": [],
+  "Blockers": [
+    "Captcha/Geetest signal found in DOM."
+  ],
+  "AuthenticatedLikely": false,
+  "BlockerLikely": true
+}

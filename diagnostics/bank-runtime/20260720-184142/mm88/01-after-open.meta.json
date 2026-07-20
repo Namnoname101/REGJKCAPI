@@ -1,0 +1,18 @@
+﻿{
+  "Stage": "01-after-open",
+  "CapturedAt": "2026-07-20T18:42:06.7408932+07:00",
+  "Url": "https://www.mm88p.com/register?referralCode=mgr0794\u0026affiliateCode=gioithieu",
+  "Title": "MM88",
+  "SourceFile": "01-after-open.html",
+  "ScreenshotFile": "01-after-open.png",
+  "ElementsFile": "01-after-open.elements.json",
+  "Iframes": [],
+  "FrameFiles": [],
+  "Elements": [],
+  "AuthenticatedSignals": [],
+  "Blockers": [
+    "Captcha/Geetest signal found in DOM."
+  ],
+  "AuthenticatedLikely": false,
+  "BlockerLikely": true
+}

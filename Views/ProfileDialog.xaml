@@ -1,0 +1,151 @@
+<Window x:Class="VibecodeReg.Views.ProfileDialog"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+        xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+        xmlns:viewModels="clr-namespace:VibecodeReg.ViewModels"
+        mc:Ignorable="d"
+        Title="Add Profile"
+        Width="620"
+        Height="720"
+        MinWidth="560"
+        MinHeight="620"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="CanResize"
+        Background="#F4F6F8"
+        d:DataContext="{d:DesignInstance Type=viewModels:ProfileDialogViewModel, IsDesignTimeCreatable=True}">
+    <Window.Resources>
+        <SolidColorBrush x:Key="PanelBrush" Color="#FFFFFF" />
+        <SolidColorBrush x:Key="BorderBrushSoft" Color="#D8DEE8" />
+        <SolidColorBrush x:Key="AccentBrush" Color="#1F7A6D" />
+
+        <Style TargetType="TextBox">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Padding" Value="8,5" />
+            <Setter Property="BorderBrush" Value="{StaticResource BorderBrushSoft}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="VerticalContentAlignment" Value="Center" />
+        </Style>
+
+        <Style TargetType="ComboBox">
+            <Setter Property="MinHeight" Value="32" />
+            <Setter Property="Padding" Value="6,3" />
+        </Style>
+
+        <Style TargetType="Button">
+            <Setter Property="MinHeight" Value="34" />
+            <Setter Property="MinWidth" Value="96" />
+            <Setter Property="Padding" Value="14,6" />
+            <Setter Property="Margin" Value="6,0,0,0" />
+            <Setter Property="Background" Value="{StaticResource AccentBrush}" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+            <Setter Property="Cursor" Value="Hand" />
+            <Style.Triggers>
+                <Trigger Property="IsEnabled" Value="False">
+                    <Setter Property="Background" Value="#A9B3BF" />
+                    <Setter Property="BorderBrush" Value="#A9B3BF" />
+                </Trigger>
+            </Style.Triggers>
+        </Style>
+    </Window.Resources>
+
+    <Grid Margin="18">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <Border Grid.Row="0"
+                Background="{StaticResource PanelBrush}"
+                BorderBrush="{StaticResource BorderBrushSoft}"
+                BorderThickness="1"
+                Padding="18">
+            <ScrollViewer VerticalScrollBarVisibility="Auto">
+                <Grid>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150" />
+                        <ColumnDefinition Width="*" />
+                    </Grid.ColumnDefinitions>
+
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                        <RowDefinition Height="Auto" />
+                    </Grid.RowDefinitions>
+
+                    <TextBlock Grid.Row="0" Grid.Column="0" Text="Target Sites" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <ItemsControl Grid.Row="0" Grid.Column="1" ItemsSource="{Binding SiteRuns}" Margin="0,0,0,12">
+                        <ItemsControl.ItemsPanel>
+                            <ItemsPanelTemplate>
+                                <WrapPanel />
+                            </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                            <DataTemplate>
+                                <CheckBox Content="{Binding Site}"
+                                          IsChecked="{Binding IsSelected, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                          Margin="0,0,18,8"
+                                          VerticalAlignment="Center" />
+                            </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                    </ItemsControl>
+
+                    <TextBlock Grid.Row="1" Grid.Column="0" Text="Username" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="2" Grid.Column="0" Text="Password" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="3" Grid.Column="0" Text="Phone Number" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding PhoneNumber, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="4" Grid.Column="0" Text="Full Name" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="4" Grid.Column="1" Text="{Binding FullName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="5" Grid.Column="0" Text="Level 2 Password" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="5" Grid.Column="1" Text="{Binding Level2Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="6" Grid.Column="0" Text="Account Number" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="6" Grid.Column="1" Text="{Binding AccountNumber, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="7" Grid.Column="0" Text="Bank Name" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="7" Grid.Column="1" Text="{Binding BankName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="8" Grid.Column="0" Text="Branch" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="8" Grid.Column="1" Text="{Binding Branch, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+
+                    <TextBlock Grid.Row="9" Grid.Column="0" Text="Proxy" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <TextBox Grid.Row="9" Grid.Column="1" Text="{Binding Proxy, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" ToolTip="host:port, host:port:user:pass, user:pass@host:port, scheme://user:pass@host:port" />
+
+                    <TextBlock Grid.Row="10" Grid.Column="0" Text="User Agent" Margin="0,0,12,0" VerticalAlignment="Center" FontWeight="SemiBold" />
+                    <StackPanel Grid.Row="10" Grid.Column="1">
+                        <Button Content="Random User-Agent"
+                                Command="{Binding GenerateRandomUserAgentCommand}"
+                                HorizontalAlignment="Left"
+                                Margin="0,0,0,8" />
+                        <TextBox Text="{Binding UserAgent, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="72" />
+                    </StackPanel>
+                </Grid>
+            </ScrollViewer>
+        </Border>
+
+        <StackPanel Grid.Row="1"
+                    Orientation="Horizontal"
+                    HorizontalAlignment="Right"
+                    Margin="0,14,0,0">
+            <Button Content="Cancel" Command="{Binding CancelCommand}" Background="#FFFFFF" Foreground="#26313D" BorderBrush="{StaticResource BorderBrushSoft}" />
+            <Button Content="Add" Command="{Binding ConfirmCommand}" />
+        </StackPanel>
+    </Grid>
+</Window>
