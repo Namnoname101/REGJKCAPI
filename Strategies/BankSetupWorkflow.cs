@@ -150,6 +150,11 @@ internal static class BankSetupWorkflow
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Submitting bank setup...");
             ClickSubmitButton(driver, TimeSpan.FromSeconds(15));
 
+            AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Handling confirmation popup if any...");
+            ClickConfirmationPopupIfAny(driver, executionContext);
+
+            executionContext.Delay(TimeSpan.FromSeconds(5));
+
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Bank setup submitted. Waiting for final result flow...");
             return true;
         }
@@ -208,13 +213,15 @@ internal static class BankSetupWorkflow
 
     private static void NavigateToBankSetup(IWebDriver driver, AutomationExecutionContext executionContext)
     {
-        if (!ClickBestTextMatch(
-                driver,
-                [By.CssSelector(".footer-menu-item"), By.CssSelector("a.footer-item"), By.CssSelector(".footer-item")],
-                ["rut", "withdraw", "bank", "vi", "wallet", "tai khoan", "account", "mine", "me", "cua toi"],
-                TimeSpan.FromSeconds(8)))
+        try
         {
-            ClickAnyVisible(driver, FooterNavigationSelectors, TimeSpan.FromSeconds(8), required: false);
+            var uri = new Uri(driver.Url);
+            var memberHomeUrl = $"{uri.Scheme}://{uri.Host}/m/member/home{uri.Query}";
+            driver.Navigate().GoToUrl(memberHomeUrl);
+        }
+        catch (UriFormatException)
+        {
+            // Ignore format exceptions and just proceed, although unlikely
         }
 
         executionContext.Delay(TimeSpan.FromSeconds(2));
@@ -320,6 +327,53 @@ internal static class BankSetupWorkflow
             timeout);
 
         submitButton.ClickLikeHuman(driver);
+    }
+
+    private static void ClickConfirmationPopupIfAny(IWebDriver driver, AutomationExecutionContext executionContext)
+    {
+        executionContext.Delay(TimeSpan.FromSeconds(2));
+        
+        try
+        {
+            var wait = CreateWait(driver, TimeSpan.FromSeconds(3));
+            var confirmButton = wait.Until(webDriver =>
+            {
+                var elements = FindVisibleElements(webDriver, [
+                    By.CssSelector(".am-modal-button"),
+                    By.CssSelector(".am-dialog-button"),
+                    By.CssSelector(".dialog-btn"),
+                    By.CssSelector(".van-dialog__confirm"),
+                    By.CssSelector(".am-modal button"),
+                    By.CssSelector(".am-dialog button"),
+                    By.CssSelector(".van-dialog button"),
+                    By.CssSelector(".dialog button")
+                ]);
+                
+                return elements.FirstOrDefault(element =>
+                {
+                    var normalizedText = NormalizeForMatch(element.Text ?? string.Empty);
+                    return ContainsAny(normalizedText, "xac nhan", "confirm", "dong y", "yes", "ok");
+                });
+            });
+            
+            if (confirmButton != null)
+            {
+                if (driver is IJavaScriptExecutor js)
+                {
+                    js.ExecuteScript("arguments[0].click();", confirmButton);
+                }
+                else
+                {
+                    confirmButton.ClickLikeHuman(driver);
+                }
+                
+                executionContext.Delay(TimeSpan.FromSeconds(1));
+            }
+        }
+        catch (WebDriverTimeoutException)
+        {
+            // No confirmation popup appeared, which is completely fine.
+        }
     }
 
     private static bool ClickBestTextMatch(

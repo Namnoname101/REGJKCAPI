@@ -210,6 +210,24 @@ public partial class MainViewModel : ObservableObject, IDisposable
     }
 
     [RelayCommand]
+    private void CopyUsername(AccountModel? selectedAccount)
+    {
+        if (selectedAccount != null && !string.IsNullOrEmpty(selectedAccount.Username))
+        {
+            Clipboard.SetText(selectedAccount.Username);
+        }
+    }
+
+    [RelayCommand]
+    private void CopyPassword(AccountModel? selectedAccount)
+    {
+        if (selectedAccount != null && !string.IsNullOrEmpty(selectedAccount.Password))
+        {
+            Clipboard.SetText(selectedAccount.Password);
+        }
+    }
+
+    [RelayCommand]
     private void EditProfile(AccountModel? selectedAccount)
     {
         if (selectedAccount is null)

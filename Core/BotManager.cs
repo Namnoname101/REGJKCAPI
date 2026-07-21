@@ -54,11 +54,7 @@ public sealed class BotManager
         try
         {
         var jobs = profiles
-            .SelectMany(account => account.SiteRuns
-                .Where(siteRun => siteRun.IsSelected
-                    && siteRun.Status != AccountStatus.Running
-                    && siteRun.Status != AccountStatus.Success)
-                .Select(siteRun => new SiteRunJob(account, siteRun)))
+            .Where(account => account.SiteRuns.Any(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone))
             .ToList();
 
         if (jobs.Count == 0)
@@ -69,7 +65,7 @@ public sealed class BotManager
         maxThreads = Math.Max(1, maxThreads);
 
         using var semaphore = new SemaphoreSlim(maxThreads);
-        var tasks = jobs.Select(job => RunJobAsync(job, semaphore, executionContext, onSiteCompleted));
+        var tasks = jobs.Select(account => RunJobAsync(account, semaphore, executionContext, onSiteCompleted));
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
     }
@@ -80,30 +76,42 @@ public sealed class BotManager
 }
 
 private async Task RunJobAsync(
-    SiteRunJob job,
+    AccountModel account,
     SemaphoreSlim semaphore,
     AutomationExecutionContext executionContext,
     Action? onSiteCompleted)
 {
     var slotAcquired = false;
+    var pendingSites = account.SiteRuns
+        .Where(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone)
+        .ToList();
 
     try
     {
         executionContext.Checkpoint();
-        AutomationUi.SetSiteStatus(job.Account, job.SiteRun, AccountStatus.Running, "Queued. Waiting for browser slot...");
+        foreach (var sr in pendingSites)
+        {
+            AutomationUi.SetSiteStatus(account, sr, AccountStatus.Running, "Queued. Waiting for browser slot...");
+        }
 
         await semaphore.WaitAsync(executionContext.CancellationToken).ConfigureAwait(false);
         slotAcquired = true;
 
         executionContext.Checkpoint();
         await Task.Run(
-                () => RunSingleRegistration(job.Account, job.SiteRun, executionContext),
+                () => RunAccountRegistration(account, executionContext, onSiteCompleted),
                 executionContext.CancellationToken)
             .ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (executionContext.CancellationToken.IsCancellationRequested)
     {
-        AutomationUi.SetSiteStatus(job.Account, job.SiteRun, AccountStatus.Stopped, "Stopped by operator.");
+        foreach (var sr in pendingSites)
+        {
+            if (sr.Status == AccountStatus.Running || sr.Status == AccountStatus.Ready)
+            {
+                AutomationUi.SetSiteStatus(account, sr, AccountStatus.Stopped, "Stopped by operator.");
+            }
+        }
     }
     finally
     {
@@ -111,59 +119,120 @@ private async Task RunJobAsync(
         {
             semaphore.Release();
         }
-        onSiteCompleted?.Invoke();
     }
 }
 
-    private static void RunSingleRegistration(
-        AccountModel account,
-        SiteRunModel siteRun,
-        AutomationExecutionContext executionContext)
+private static void RunAccountRegistration(
+    AccountModel account,
+    AutomationExecutionContext executionContext,
+    Action? onSiteCompleted)
+{
+    var siteRunsToRun = account.SiteRuns
+        .Where(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone)
+        .ToList();
+
+    if (siteRunsToRun.Count == 0) return;
+
+    try
     {
-        try
+        executionContext.Checkpoint();
+        foreach (var sr in siteRunsToRun)
         {
-            executionContext.Checkpoint();
-            var strategy = StrategyFactory.Create(siteRun.Site);
+            AutomationUi.SetSiteStatus(account, sr, AccountStatus.Running, "Launching browser profile...");
+        }
 
-            AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Launching isolated browser profile...");
-            executionContext.Checkpoint();
-            using IWebDriver driver = DriverFactory.CreateDriver(account, siteRun.Site);
+        using IWebDriver driver = DriverFactory.CreateDriver(account);
 
-            AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Executing registration phase...");
-            executionContext.Checkpoint();
-            var registrationSucceeded = strategy.ExecuteRegistration(driver, account, siteRun, executionContext);
-            if (!registrationSucceeded)
+        bool isFirstTab = true;
+
+        foreach (var siteRun in siteRunsToRun)
+        {
+            try
             {
-                if (siteRun.Status != AccountStatus.Failed)
+                if (executionContext.CancellationToken.IsCancellationRequested)
                 {
-                    AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Registration phase failed.");
+                    throw new OperationCanceledException(executionContext.CancellationToken);
                 }
 
-                return;
-            }
+                if (!isFirstTab)
+                {
+                    AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Opening new tab...");
+                    ((IJavaScriptExecutor)driver).ExecuteScript("window.open();");
+                    driver.SwitchTo().Window(driver.WindowHandles.Last());
+                }
+                isFirstTab = false;
 
-            AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Phase1_RegDone, "Registration completed. Starting bank setup...");
-            executionContext.Checkpoint();
-            var bankSetupSucceeded = strategy.ExecuteBankSetup(driver, account, siteRun, executionContext);
-            if (!bankSetupSucceeded)
+                RunSingleSiteInBrowser(driver, account, siteRun, executionContext);
+            }
+            catch (OperationCanceledException)
             {
-                AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Bank setup phase failed.");
-                return;
+                throw;
             }
-
-            executionContext.Checkpoint();
-            ResultWriter.AppendSuccess(account, siteRun.Site);
-            AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Success, "Completed successfully. Saved to success.txt.");
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (Exception ex)
-        {
-            AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, $"Failed: {ex.Message}");
+            finally
+            {
+                onSiteCompleted?.Invoke();
+            }
         }
     }
+    catch (OperationCanceledException)
+    {
+        throw;
+    }
+    catch (Exception ex)
+    {
+        foreach (var sr in siteRunsToRun.Where(s => s.Status == AccountStatus.Running || s.Status == AccountStatus.Ready))
+        {
+            AutomationUi.SetSiteStatus(account, sr, AccountStatus.Failed, $"Browser error: {ex.Message}");
+        }
+    }
+}
+
+private static void RunSingleSiteInBrowser(
+    IWebDriver driver,
+    AccountModel account,
+    SiteRunModel siteRun,
+    AutomationExecutionContext executionContext)
+{
+    try
+    {
+        executionContext.Checkpoint();
+        var strategy = StrategyFactory.Create(siteRun.Site);
+
+        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Executing registration phase...");
+        executionContext.Checkpoint();
+        var registrationSucceeded = strategy.ExecuteRegistration(driver, account, siteRun, executionContext);
+        if (!registrationSucceeded)
+        {
+            if (siteRun.Status != AccountStatus.Failed)
+            {
+                AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Registration phase failed.");
+            }
+
+            return;
+        }
+
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Phase1_RegDone, "Registration completed. Starting bank setup...");
+        executionContext.Checkpoint();
+        var bankSetupSucceeded = strategy.ExecuteBankSetup(driver, account, siteRun, executionContext);
+        if (!bankSetupSucceeded)
+        {
+            AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Bank setup phase failed.");
+            return;
+        }
+
+        executionContext.Checkpoint();
+        ResultWriter.AppendSuccess(account, siteRun.Site);
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Success, "Completed successfully. Saved to success.txt.");
+    }
+    catch (OperationCanceledException)
+    {
+        throw;
+    }
+    catch (Exception ex)
+    {
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, $"Failed: {ex.Message}");
+    }
+}
 
     private CancellationTokenSource BeginRun()
     {
@@ -193,6 +262,4 @@ private async Task RunJobAsync(
             cancellationTokenSource.Dispose();
         }
     }
-
-    private sealed record SiteRunJob(AccountModel Account, SiteRunModel SiteRun);
 }

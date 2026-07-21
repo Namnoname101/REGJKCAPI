@@ -145,6 +145,34 @@ public partial class ProfileDialogViewModel : ObservableObject
         UserAgent = await UserAgentHelper.GetFreshRandomUserAgentAsync();
     }
 
+    [RelayCommand]
+    private void GenerateRandomPassword()
+    {
+        Password = GenerateRandomPasswordString();
+    }
+
+    private static string GenerateRandomPasswordString()
+    {
+        var random = new Random();
+        const string upper = "ABCDEFGHIJKLMNOPQRSTUVWXYZ";
+        const string lower = "abcdefghijklmnopqrstuvwxyz";
+        const string digits = "0123456789";
+
+        var password = new char[10];
+        password[0] = upper[random.Next(upper.Length)];
+        password[1] = lower[random.Next(lower.Length)];
+        password[2] = digits[random.Next(digits.Length)];
+        password[3] = digits[random.Next(digits.Length)];
+
+        const string all = upper + lower + digits;
+        for (int i = 4; i < 10; i++)
+        {
+            password[i] = all[random.Next(all.Length)];
+        }
+
+        return new string(password.OrderBy(x => random.Next()).ToArray());
+    }
+
     private bool CanConfirm() =>
         !string.IsNullOrWhiteSpace(Username)
         && !string.IsNullOrWhiteSpace(Password)

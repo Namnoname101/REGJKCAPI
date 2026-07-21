@@ -105,7 +105,14 @@
                     <TextBox Grid.Row="1" Grid.Column="1" Text="{Binding Username, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
 
                     <TextBlock Grid.Row="2" Grid.Column="0" Text="Password" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
-                    <TextBox Grid.Row="2" Grid.Column="1" Text="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
+                    <Grid Grid.Row="2" Grid.Column="1" Margin="0,0,0,12">
+                        <Grid.ColumnDefinitions>
+                            <ColumnDefinition Width="*" />
+                            <ColumnDefinition Width="Auto" />
+                        </Grid.ColumnDefinitions>
+                        <TextBox Grid.Column="0" Text="{Binding Password, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" />
+                        <Button Grid.Column="1" Content="Random" Command="{Binding GenerateRandomPasswordCommand}" MinWidth="70" MinHeight="28" Padding="10,4" Margin="6,0,0,0" />
+                    </Grid>
 
                     <TextBlock Grid.Row="3" Grid.Column="0" Text="Phone Number" Margin="0,0,12,12" VerticalAlignment="Center" FontWeight="SemiBold" />
                     <TextBox Grid.Row="3" Grid.Column="1" Text="{Binding PhoneNumber, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" Margin="0,0,0,12" />
