@@ -2,9 +2,9 @@ using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using System;
 using System.IO;
-using VibecodeReg.Models;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public static class DriverFactory
 {
@@ -105,16 +105,33 @@ public static class DriverFactory
 
         var options = new ChromeOptions
         {
-            PageLoadStrategy = PageLoadStrategy.Eager
+            PageLoadStrategy = PageLoadStrategy.None
         };
+        
+        // Dùng tọa độ âm để giấu cửa sổ thay vì Headless (tránh bị Cloudflare block)
+        // options.AddArgument("--headless=new"); 
+        options.AddArgument("--window-position=-32000,-32000");
+        options.AddArgument("--window-size=1280,1024");
+        
+        // Ẩn các dấu hiệu Selenium
+        options.AddExcludedArgument("enable-automation");
+        options.AddArgument("--disable-blink-features=AutomationControlled");
+
         options.AddArgument($"--user-data-dir={profileFolderPath}");
         options.AddArgument("--disable-gpu");
         options.AddArgument("--no-sandbox");
         options.AddArgument("--disable-dev-shm-usage");
+        options.AddArgument("--disable-software-rasterizer"); // Giảm tải CPU khi tắt GPU
+        options.AddArgument("--ignore-certificate-errors"); // Vượt lỗi SSL của Proxy
         options.AddArgument("--disable-notifications");
         options.AddArgument("--disable-popup-blocking");
-        options.AddUserProfilePreference("profile.default_content_setting_values.images", 1);
-        options.AddUserProfilePreference("profile.managed_default_content_settings.images", 1);
+        options.AddArgument("--mute-audio"); // Tắt tiếng
+        options.AddArgument("--disable-background-timer-throttling"); // Chống Chrome bóp băng thông khi tab ẩn
+        options.AddArgument("--disable-backgrounding-occluded-windows");
+        options.AddArgument("--disable-renderer-backgrounding");
+        
+        options.AddUserProfilePreference("profile.default_content_setting_values.images", 2);
+        options.AddUserProfilePreference("profile.managed_default_content_settings.images", 2);
 
         if (!string.IsNullOrWhiteSpace(userAgent))
         {

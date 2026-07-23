@@ -1,9 +1,9 @@
 using System;
 using System.Linq;
 using System.Windows;
-using VibecodeReg.Models;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public static class AutomationUi
 {
@@ -31,15 +31,15 @@ public static class AutomationUi
     {
         RunOnUiThread(() =>
         {
-            if (status.HasValue)
-            {
-                siteRun.Status = status.Value;
-            }
-
             if (logMessage is not null)
             {
                 siteRun.LogMessage = logMessage;
                 account.LogMessage = $"{siteRun.Site}: {logMessage}";
+            }
+
+            if (status.HasValue)
+            {
+                siteRun.Status = status.Value;
             }
 
             UpdateAccountStatus(account);
