@@ -75,9 +75,30 @@ public static class DriverFactory
         }
 
         var driver = new ManagedChromeDriver(service, options, cleanupResource: cleanupResource);
-
+        
         try
         {
+            // Tối ưu hóa Timeout
+            driver.Manage().Timeouts().PageLoad = TimeSpan.FromSeconds(30);
+            driver.Manage().Timeouts().AsynchronousJavaScript = TimeSpan.FromSeconds(15);
+            driver.Manage().Timeouts().ImplicitWait = TimeSpan.Zero; // Không dùng implicit wait dài theo lời khuyên của ChatGPT
+
+            // Chặn tải các tài nguyên nặng bằng CDP để cực kỳ nhẹ và chống đơ
+            var emptyDict = new System.Collections.Generic.Dictionary<string, object>();
+            var blockedDict = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["urls"] = new[]
+                {
+                    "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico",
+                    "*.woff", "*.woff2", "*.ttf", "*.otf",
+                    "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
+                    "*google-analytics.com/*", "*googletagmanager.com/*", "*doubleclick.net/*", "*facebook.net/tr/*"
+                }
+            };
+
+            driver.ExecuteCdpCommand("Network.enable", emptyDict);
+            driver.ExecuteCdpCommand("Network.setBlockedURLs", blockedDict);
+
             ProxyVerifier.VerifyIfNeeded(driver, proxyConfiguration);
             return driver;
         }
@@ -105,33 +126,72 @@ public static class DriverFactory
 
         var options = new ChromeOptions
         {
-            PageLoadStrategy = PageLoadStrategy.None
+            PageLoadStrategy = PageLoadStrategy.Eager,
+            UnhandledPromptBehavior = UnhandledPromptBehavior.Accept
         };
         
-        // Dùng tọa độ âm để giấu cửa sổ thay vì Headless (tránh bị Cloudflare block)
-        // options.AddArgument("--headless=new"); 
-        options.AddArgument("--window-position=-32000,-32000");
-        options.AddArgument("--window-size=1280,1024");
+        // Tắt chế độ tàng hình theo yêu cầu của user, hiện cửa sổ nhỏ
+        // options.AddArgument("--headless=new");
+        options.AddArgument("--window-size=800,600");
+        
+        // --- CÁC TỐI ƯU HIỆU NĂNG VÀ CHỐNG ĐƠ TỪ CHATGPT ---
+        
+        // Giảm hoạt động nền
+        options.AddArgument("--disable-background-networking");
+        options.AddArgument("--disable-background-mode");
+        options.AddArgument("--disable-default-apps");
+        options.AddArgument("--disable-sync");
+        options.AddArgument("--disable-extensions");
+        options.AddArgument("--disable-component-update");
+        options.AddArgument("--disable-domain-reliability");
+        
+        // Cho phép Windows bóp băng thông CPU nếu cửa sổ nằm dưới (tiết kiệm 90% CPU)
+        options.AddArgument("--disable-features=Translate,MediaRouter,OptimizationHints,site-per-process");
+        options.AddArgument("--disable-smooth-scrolling");
+        options.AddArgument("--wm-window-animations-disabled");
+        options.AddArgument("--disable-ipc-flooding-protection");
+        options.AddArgument("--disable-backgrounding-occluded-windows=false");
+        options.AddArgument("--blink-settings=imagesEnabled=false");
+
+        // KHÔNG TẮT GPU VÀ WEBGL vì trên Windows việc tắt nó sẽ ép CPU gánh toàn bộ quá trình render web gây CPU 100%
+        // options.AddArgument("--disable-gpu"); 
+        // options.AddArgument("--disable-software-rasterizer");
+
+        // Giảm tính năng không cần thiết
+        options.AddArgument("--disable-notifications");
+        options.AddArgument("--disable-popup-blocking");
+        options.AddArgument("--disable-print-preview");
+        options.AddArgument("--disable-speech-api");
+        options.AddArgument("--disable-logging");
+        options.AddArgument("--log-level=3");
+        options.AddArgument("--silent");
+        options.AddArgument("--mute-audio");
+        
+        // Cho phép Chrome tự động ngủ đông các luồng ngầm để cứu CPU
+        // options.AddArgument("--disable-background-timer-throttling");
+        // options.AddArgument("--disable-backgrounding-occluded-windows");
+        // options.AddArgument("--disable-renderer-backgrounding");
         
         // Ẩn các dấu hiệu Selenium
         options.AddExcludedArgument("enable-automation");
         options.AddArgument("--disable-blink-features=AutomationControlled");
 
         options.AddArgument($"--user-data-dir={profileFolderPath}");
-        options.AddArgument("--disable-gpu");
         options.AddArgument("--no-sandbox");
         options.AddArgument("--disable-dev-shm-usage");
-        options.AddArgument("--disable-software-rasterizer"); // Giảm tải CPU khi tắt GPU
-        options.AddArgument("--ignore-certificate-errors"); // Vượt lỗi SSL của Proxy
-        options.AddArgument("--disable-notifications");
-        options.AddArgument("--disable-popup-blocking");
-        options.AddArgument("--mute-audio"); // Tắt tiếng
-        options.AddArgument("--disable-background-timer-throttling"); // Chống Chrome bóp băng thông khi tab ẩn
-        options.AddArgument("--disable-backgrounding-occluded-windows");
-        options.AddArgument("--disable-renderer-backgrounding");
+        options.AddArgument("--ignore-certificate-errors");
+
+        // Không lưu cache lâu dài
+        options.AddArgument("--disk-cache-size=1");
+        options.AddArgument("--media-cache-size=1");
         
+        // Tắt tính năng bằng Preference
         options.AddUserProfilePreference("profile.default_content_setting_values.images", 2);
         options.AddUserProfilePreference("profile.managed_default_content_settings.images", 2);
+        options.AddUserProfilePreference("profile.default_content_setting_values.notifications", 2);
+        options.AddUserProfilePreference("profile.default_content_setting_values.geolocation", 2);
+        options.AddUserProfilePreference("profile.default_content_setting_values.media_stream_mic", 2);
+        options.AddUserProfilePreference("profile.default_content_setting_values.media_stream_camera", 2);
 
         if (!string.IsNullOrWhiteSpace(userAgent))
         {

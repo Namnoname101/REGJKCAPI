@@ -3,7 +3,7 @@ using OpenQA.Selenium.Interactions;
 using System;
 using System.Threading.Tasks;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public static class SeleniumHumanExtensions
 {
@@ -23,17 +23,16 @@ public static class SeleniumHumanExtensions
         ArgumentNullException.ThrowIfNull(driver);
 
         ScrollIntoView(driver, element);
-        RandomPause(100, 300);
-
-        new Actions(driver)
-            .MoveToElement(element)
-            .Pause(TimeSpan.FromMilliseconds(new Random().Next(100, 300)))
-            .ClickAndHold(element)
-            .Pause(TimeSpan.FromMilliseconds(new Random().Next(50, 150)))
-            .Release(element)
-            .Perform();
-
-        RandomPause(300, 700);
+        
+        try 
+        { 
+            element.Click(); 
+        } 
+        catch 
+        {
+            // Fallback to JS click if normal click fails
+            ((IJavaScriptExecutor)driver).ExecuteScript("arguments[0].click();", element);
+        }
     }
 
     public static void SendKeysLikeHuman(this IWebElement element, IWebDriver driver, string text)
@@ -42,24 +41,15 @@ public static class SeleniumHumanExtensions
         ArgumentNullException.ThrowIfNull(driver);
 
         ScrollIntoView(driver, element);
-        RandomPause(300, 1000);
+        
+        try { element.Click(); } catch { }
+        try { element.Clear(); } catch { }
 
-        element.Click();
-        RandomPause(100, 300);
-        element.Clear();
-
-        foreach (var character in text ?? string.Empty)
+        // Tối ưu tốc độ: Nhập toàn bộ chuỗi ngay lập tức thay vì gõ từng phím
+        if (!string.IsNullOrEmpty(text))
         {
-            element.SendKeys(character.ToString());
-            RandomPause(20, 60);
-
-            if (Random.Shared.NextDouble() < 0.08)
-            {
-                RandomPause(300, 900);
-            }
+            element.SendKeys(text);
         }
-
-        RandomPause(200, 500);
     }
 
     private static void ScrollIntoView(IWebDriver driver, IWebElement element)
@@ -67,8 +57,9 @@ public static class SeleniumHumanExtensions
         if (driver is IJavaScriptExecutor javaScriptExecutor)
         {
             javaScriptExecutor.ExecuteScript(
-                "arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});",
+                "arguments[0].scrollIntoView({block: 'center'});",
                 element);
+            Task.Delay(100).Wait(); // Nghỉ một nhịp ngắn sau khi cuộn để DOM ổn định
         }
     }
 }

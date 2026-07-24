@@ -1,8 +1,8 @@
-using OpenQA.Selenium;
+﻿using OpenQA.Selenium;
 using System;
 using System.Threading.Tasks;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public static class SeleniumExtensions
 {

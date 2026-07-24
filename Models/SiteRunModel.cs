@@ -1,6 +1,6 @@
-using CommunityToolkit.Mvvm.ComponentModel;
+﻿using CommunityToolkit.Mvvm.ComponentModel;
 
-namespace VibecodeReg.Models;
+namespace BAOCODETOOL.Models;
 
 public partial class SiteRunModel : ObservableObject
 {

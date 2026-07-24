@@ -1,8 +1,8 @@
-using System;
+﻿using System;
 using System.Windows;
-using VibecodeReg.ViewModels;
+using BAOCODETOOL.ViewModels;
 
-namespace VibecodeReg.Views;
+namespace BAOCODETOOL.Views;
 
 public partial class ProfileDialog : Window
 {

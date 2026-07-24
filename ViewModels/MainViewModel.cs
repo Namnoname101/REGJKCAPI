@@ -10,11 +10,11 @@ using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
 using System.Windows;
-using VibecodeReg.Core;
-using VibecodeReg.Models;
-using VibecodeReg.Views;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Models;
+using BAOCODETOOL.Views;
 
-namespace VibecodeReg.ViewModels;
+namespace BAOCODETOOL.ViewModels;
 
 public partial class MainViewModel : ObservableObject, IDisposable
 {
@@ -33,6 +33,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
         foreach (var profile in loadedProfiles)
         {
             Profiles.Add(profile);
+            foreach (var siteRun in profile.SiteRuns)
+            {
+                siteRun.PropertyChanged += SiteRunOnPropertyChanged;
+            }
         }
 
         Profiles.CollectionChanged += ProfilesOnCollectionChanged;
@@ -180,7 +184,7 @@ public partial class MainViewModel : ObservableObject, IDisposable
             return;
         }
 
-        await RunProfilesAsync(new[] { account }, 1);
+        await RunProfilesAsync(new[] { account }, MaxThreads);
     }
 
     [RelayCommand]
@@ -473,6 +477,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
             foreach (AccountModel account in e.OldItems)
             {
                 account.PropertyChanged -= AccountOnPropertyChanged;
+                foreach (var siteRun in account.SiteRuns)
+                {
+                    siteRun.PropertyChanged -= SiteRunOnPropertyChanged;
+                }
             }
         }
 
@@ -481,6 +489,10 @@ public partial class MainViewModel : ObservableObject, IDisposable
             foreach (AccountModel account in e.NewItems)
             {
                 account.PropertyChanged += AccountOnPropertyChanged;
+                foreach (var siteRun in account.SiteRuns)
+                {
+                    siteRun.PropertyChanged += SiteRunOnPropertyChanged;
+                }
             }
         }
 

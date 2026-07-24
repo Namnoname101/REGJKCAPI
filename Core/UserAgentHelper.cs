@@ -1,10 +1,10 @@
-using System;
+﻿using System;
 using System.Linq;
 using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Threading.Tasks;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public static class UserAgentHelper
 {
@@ -63,7 +63,7 @@ public static class UserAgentHelper
             Timeout = TimeSpan.FromSeconds(10)
         };
 
-        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("VibecodeReg/1.0");
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd("BAOCODETOOL/1.0");
         return httpClient;
     }
 }

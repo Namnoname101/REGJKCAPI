@@ -1,8 +1,10 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Net;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
@@ -20,7 +22,9 @@ namespace BAOCODETOOL.TelegramBot
     // Lưu trạng thái từng bước nhập của user
     class UserSession
     {
-        public string Step { get; set; } = "idle"; // idle | s_name | s_phone | s_bank | s_sotk | s_proxy | confirming
+        public string Step { get; set; } = "idle"; // idle | s_game | s_name | s_phone | s_bank | s_sotk | s_proxy | confirming | bulk | s_bulk_game
+        public HashSet<string> SelectedGames { get; set; } = new();
+        public string Game => SelectedGames.Count > 0 ? string.Join(", ", SelectedGames) : "ALL";
         public string FullName { get; set; } = "";
         public string Phone { get; set; } = "";
         public string BankName { get; set; } = "";
@@ -37,12 +41,14 @@ namespace BAOCODETOOL.TelegramBot
         private CancellationTokenSource? _cts;
 
         private readonly ConcurrentDictionary<long, UserSession> _sessions = new();
-        private readonly HashSet<long> _allowedUsers = new() { ADMIN_CHAT_ID };
+        private readonly HashSet<long> _allowedUsers;
         // Đếm số job đang chờ/chạy của từng user – chặn nhập thêm khi > 0
         private readonly ConcurrentDictionary<long, int> _userPendingJobs = new();
 
         private const long ADMIN_CHAT_ID = 1853328773;
         private static readonly SemaphoreSlim _queue = new SemaphoreSlim(3, 3);
+        private static readonly string AllowedUsersFilePath = Path.Combine(AppContext.BaseDirectory, "allowed_users.json");
+        private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
 
         private const string EMOJI_LOADING_ID = "";
         private const string EMOJI_SUCCESS_ID = "";
@@ -74,6 +80,21 @@ namespace BAOCODETOOL.TelegramBot
             "➕ <b>Từng bước</b> – Nhập 1 tài khoản có hướng dẫn\n" +
             "📋 <b>Hàng loạt</b> – Dán ngay danh sách có sẵn (nhiều acc)\n";
 
+        private static InlineKeyboardMarkup BuildGameSelectionKeyboard(HashSet<string> selectedGames, bool isBulk)
+        {
+            string pfx = isBulk ? "bgame_" : "game_";
+            string textRR88 = selectedGames.Contains("RR88") ? "✅ RR88" : "RR88";
+            string textMM88 = selectedGames.Contains("MM88") ? "✅ MM88" : "MM88";
+            string textXX88 = selectedGames.Contains("XX88") ? "✅ XX88" : "XX88";
+
+            return new InlineKeyboardMarkup(new[]
+            {
+                new[] { InlineKeyboardButton.WithCallbackData(textRR88, $"toggle_{pfx}RR88"), InlineKeyboardButton.WithCallbackData(textMM88, $"toggle_{pfx}MM88"), InlineKeyboardButton.WithCallbackData(textXX88, $"toggle_{pfx}XX88") },
+                new[] { InlineKeyboardButton.WithCallbackData("➡️ Tiếp tục", $"done_{pfx}") },
+                new[] { InlineKeyboardButton.WithCallbackData("🔙 Hủy", "cancel") }
+            });
+        }
+
         private UserSession GetSession(long chatId) =>
             _sessions.GetOrAdd(chatId, _ => new UserSession());
 
@@ -82,6 +103,35 @@ namespace BAOCODETOOL.TelegramBot
         {
             _botClient = new TelegramBotClient(botToken);
             _mainViewModel = mainViewModel;
+            _allowedUsers = LoadAllowedUsers();
+        }
+
+        private HashSet<long> LoadAllowedUsers()
+        {
+            var set = new HashSet<long> { ADMIN_CHAT_ID };
+            try
+            {
+                if (File.Exists(AllowedUsersFilePath))
+                {
+                    var json = File.ReadAllText(AllowedUsersFilePath);
+                    var ids = JsonSerializer.Deserialize<List<long>>(json, JsonOpts);
+                    if (ids != null)
+                        foreach (var id in ids)
+                            set.Add(id);
+                }
+            }
+            catch { }
+            return set;
+        }
+
+        private void SaveAllowedUsers()
+        {
+            try
+            {
+                var json = JsonSerializer.Serialize(_allowedUsers.ToList(), JsonOpts);
+                File.WriteAllText(AllowedUsersFilePath, json);
+            }
+            catch { }
         }
 
         public void Start()
@@ -111,6 +161,7 @@ namespace BAOCODETOOL.TelegramBot
                     if (long.TryParse(cb.Data["approve_".Length..], out var uid))
                     {
                         _allowedUsers.Add(uid);
+                        SaveAllowedUsers();
                         try
                         {
                             await bot.EditMessageText(cbChat, cb.Message!.MessageId,
@@ -129,6 +180,8 @@ namespace BAOCODETOOL.TelegramBot
                 {
                     if (long.TryParse(cb.Data["reject_".Length..], out var uid))
                     {
+                        _allowedUsers.Remove(uid);
+                        SaveAllowedUsers();
                         try
                         {
                             await bot.EditMessageText(cbChat, cb.Message!.MessageId,
@@ -145,6 +198,63 @@ namespace BAOCODETOOL.TelegramBot
                 if (!_allowedUsers.Contains(cbChat))
                 {
                     await bot.AnswerCallbackQuery(cb.Id, "⛔ Bạn chưa có quyền!", showAlert: true, cancellationToken: ct);
+                    return;
+                }
+
+                if (cb.Data?.StartsWith("toggle_game_") == true || cb.Data?.StartsWith("toggle_bgame_") == true)
+                {
+                    if (_sessions.TryGetValue(cbChat, out var sess))
+                    {
+                        bool isBulk = cb.Data.StartsWith("toggle_bgame_");
+                        string game = cb.Data.Substring(cb.Data.LastIndexOf('_') + 1);
+                        if (sess.SelectedGames.Contains(game)) sess.SelectedGames.Remove(game);
+                        else sess.SelectedGames.Add(game);
+
+                        await bot.EditMessageReplyMarkup(cbChat, cb.Message!.MessageId, replyMarkup: BuildGameSelectionKeyboard(sess.SelectedGames, isBulk), cancellationToken: ct);
+                    }
+                    await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
+                    return;
+                }
+
+                if (cb.Data == "done_game_" || cb.Data == "done_bgame_")
+                {
+                    if (_sessions.TryGetValue(cbChat, out var sess))
+                    {
+                        if (sess.SelectedGames.Count == 0)
+                        {
+                            await bot.AnswerCallbackQuery(cb.Id, "⚠️ Vui lòng chọn ít nhất 1 nhà cái!", showAlert: true, cancellationToken: ct);
+                            return;
+                        }
+
+                        bool isBulk = cb.Data == "done_bgame_";
+                        string gameStr = sess.Game;
+
+                        if (isBulk)
+                        {
+                            sess.Step = "bulk";
+                            await bot.EditMessageText(cbChat, cb.Message!.MessageId,
+                                $"📋 <b>NHẬP HÀNG LOẠT ({gameStr})</b>\n" +
+                                "━━━━━━━━━━━━━━━━━━━━\n" +
+                                "Mỗi dòng 1 tài khoản theo định dạng:\n" +
+                                "<code>HOTEN|TENNGANHANG|SDT|SOTK|PROXY</code>\n\n" +
+                                "📌 <b>Ví dụ:</b>\n" +
+                                "<code>Nguyen Van A|Vietcombank|0987654321|1234567890|1.2.3.4:8080:u:p</code>\n" +
+                                "<code>Tran Thi B|Techcombank|0912345678|9876543210|5.6.7.8:3128:u:p</code>\n\n" +
+                                "⚠️ <b>Lưu ý:</b> Mỗi dòng là 1 tài khoản, dán bao nhiêu dòng cũng được.",
+                                ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                        }
+                        else
+                        {
+                            sess.Step = "s_name";
+                            await bot.EditMessageText(cbChat, cb.Message!.MessageId,
+                                $"📝 <b>THÊM TÀI KHOẢN MỚI ({gameStr})</b>\n" +
+                                "━━━━━━━━━━━━━━━━━━━━\n\n" +
+                                "Bước <b>2/6</b> — Nhập <b>Họ và Tên</b> đầy đủ:\n\n" +
+                                "<i>VD: Nguyen Van A</i>",
+                                ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                        }
+                    }
+                    await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
                     return;
                 }
 
@@ -187,17 +297,14 @@ namespace BAOCODETOOL.TelegramBot
                         await bot.AnswerCallbackQuery(cb.Id, "⏳ Hệ thống đang chạy! Vui lòng đợi hoàn thành trước.", showAlert: true, cancellationToken: ct);
                         return;
                     }
-                    _sessions[cbChat] = new UserSession { Step = "bulk" };
+                    var bulkSess = new UserSession { Step = "s_bulk_game" };
+                    _sessions[cbChat] = bulkSess;
                     await bot.SendMessage(cbChat,
                         "📋 <b>NHẬP HÀNG LOẠT</b>\n" +
                         "━━━━━━━━━━━━━━━━━━━━\n" +
-                        "Mỗi dòng 1 tài khoản theo định dạng:\n" +
-                        "<code>HOTEN|TENNGANHANG|SDT|SOTK|PROXY</code>\n\n" +
-                        "📌 <b>Ví dụ:</b>\n" +
-                        "<code>Nguyen Van A|Vietcombank|0987654321|1234567890|1.2.3.4:8080:u:p</code>\n" +
-                        "<code>Tran Thi B|Techcombank|0912345678|9876543210|5.6.7.8:3128:u:p</code>\n\n" +
-                        "⚠️ <b>Lưu ý:</b> Mỗi dòng là 1 tài khoản, dán bao nhiêu dòng cũng được.",
-                        ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                        "Chọn <b>Nhà cái</b> để đăng ký hàng loạt:",
+                        ParseMode.Html, 
+                        replyMarkup: BuildGameSelectionKeyboard(bulkSess.SelectedGames, true), cancellationToken: ct);
                     break;
 
                 case "edit_restart":
@@ -260,12 +367,14 @@ namespace BAOCODETOOL.TelegramBot
             // /bulk shortcut
             if (text.StartsWith("/bulk"))
             {
-                _sessions[chatId] = new UserSession { Step = "bulk" };
+                var sess = new UserSession { Step = "s_bulk_game" };
+                _sessions[chatId] = sess;
                 await bot.SendMessage(chatId,
-                    "📋 <b>CHẾ ĐỘ NHẬP HÀNG LOẠT</b>\n" +
+                    "📋 <b>NHẬP HÀNG LOẠT</b>\n" +
                     "━━━━━━━━━━━━━━━━━━━━\n" +
-                    "Mỗi dòng 1 tài khoản: <code>HOTEN|TENNGANHANG|SDT|SOTK|PROXY</code>",
-                    ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                    "Chọn <b>Nhà cái</b> để đăng ký hàng loạt:",
+                    ParseMode.Html, 
+                    replyMarkup: BuildGameSelectionKeyboard(sess.SelectedGames, true), cancellationToken: ct);
                 return;
             }
 
@@ -309,15 +418,15 @@ namespace BAOCODETOOL.TelegramBot
         // Bắt đầu flow nhập từng bước
         private async Task StartAddFlow(ITelegramBotClient bot, long chatId, CancellationToken ct)
         {
-            var sess = new UserSession { Step = "s_name" };
+            var sess = new UserSession { Step = "s_game" };
             _sessions[chatId] = sess;
 
             var sent = await bot.SendMessage(chatId,
                 "📝 <b>THÊM TÀI KHOẢN MỚI</b>\n" +
                 "━━━━━━━━━━━━━━━━━━━━\n\n" +
-                "Bước <b>1/5</b> — Nhập <b>Họ và Tên</b> đầy đủ:\n\n" +
-                "<i>VD: Nguyen Van A</i>",
-                ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                "Bước <b>1/6</b> — Chọn <b>Nhà cái</b> để đăng ký:",
+                ParseMode.Html, 
+                replyMarkup: BuildGameSelectionKeyboard(sess.SelectedGames, false), cancellationToken: ct);
 
             sess.GuideMessageId = sent.MessageId;
         }
@@ -334,6 +443,11 @@ namespace BAOCODETOOL.TelegramBot
 
             switch (sess.Step)
             {
+                case "s_game":
+                case "s_bulk_game":
+                    await bot.SendMessage(chatId, "Vui lòng chọn Nhà cái bằng cách nhấn vào các nút ở trên.", cancellationToken: ct);
+                    return;
+
                 case "s_name":
                     if (text.Length < 3 || text.Any(char.IsDigit))
                     {
@@ -343,7 +457,7 @@ namespace BAOCODETOOL.TelegramBot
                     sess.FullName = text;
                     sess.Step = "s_phone";
                     await bot.SendMessage(chatId,
-                        "Bước <b>2/5</b> — Nhập <b>Số điện thoại</b>:\n\n" +
+                        "Bước <b>3/6</b> — Nhập <b>Số điện thoại</b>:\n\n" +
                         "<i>Yêu cầu: đúng 10 chữ số, bắt đầu bằng 0\nVD: 0987654321</i>",
                         ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
                     break;
@@ -358,7 +472,7 @@ namespace BAOCODETOOL.TelegramBot
                     sess.Phone = phone;
                     sess.Step = "s_bank";
                     await bot.SendMessage(chatId,
-                        "Bước <b>3/5</b> — Nhập <b>Tên ngân hàng</b>:\n\n" +
+                        "Bước <b>4/6</b> — Nhập <b>Tên ngân hàng</b>:\n\n" +
                         "<i>VD: Vietcombank, Techcombank, MBBank, ACB, BIDV...</i>",
                         ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
                     break;
@@ -372,7 +486,7 @@ namespace BAOCODETOOL.TelegramBot
                     sess.BankName = text;
                     sess.Step = "s_sotk";
                     await bot.SendMessage(chatId,
-                        "Bước <b>4/5</b> — Nhập <b>Số tài khoản ngân hàng</b>:\n\n" +
+                        "Bước <b>5/6</b> — Nhập <b>Số tài khoản ngân hàng</b>:\n\n" +
                         "<i>Yêu cầu: chỉ gồm số, độ dài 6-20 ký tự\nVD: 1234567890</i>",
                         ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
                     break;
@@ -387,7 +501,7 @@ namespace BAOCODETOOL.TelegramBot
                     sess.SoTk = sotk;
                     sess.Step = "s_proxy";
                     await bot.SendMessage(chatId,
-                        "Bước <b>5/5</b> — Nhập <b>Proxy</b>:\n\n" +
+                        "Bước <b>6/6</b> — Nhập <b>Proxy</b>:\n\n" +
                         "📌 <b>Định dạng bắt buộc:</b>\n" +
                         "<code>ip:port</code>  hoặc  <code>ip:port:user:pass</code>\n\n" +
                         "<i>VD: 123.45.67.89:8080:username:password</i>",
@@ -412,6 +526,7 @@ namespace BAOCODETOOL.TelegramBot
                     await bot.SendMessage(chatId,
                         "📋 <b>XÁC NHẬN THÔNG TIN</b>\n" +
                         "━━━━━━━━━━━━━━━━━━━━\n" +
+                        $"🎮 Nhà cái:  <b>{WebUtility.HtmlEncode(sess.Game)}</b>\n" +
                         $"👤 Họ tên:    <b>{WebUtility.HtmlEncode(sess.FullName)}</b>\n" +
                         $"📞 SĐT:       <b>{WebUtility.HtmlEncode(sess.Phone)}</b>\n" +
                         $"🏦 Ngân hàng: <b>{WebUtility.HtmlEncode(sess.BankName)}</b>\n" +
@@ -445,17 +560,19 @@ namespace BAOCODETOOL.TelegramBot
         {
             _sessions.TryRemove(chatId, out _);
 
-            var chars = "abcdefghijklmnopqrstuvwxyz";
             var rng = new Random();
-            var rand5 = new string(Enumerable.Repeat(chars, 5).Select(s => s[rng.Next(s.Length)]).ToArray());
+            // Username có nghĩa: tên người dùng viết thường không dấu + số ngẫu nhiên
+            var usernameBase = RemoveDiacritics(sess.FullName.Split(' ').Last().ToLower());
+            if (usernameBase.Length < 3) usernameBase = RemoveDiacritics(sess.FullName.Replace(" ", "").ToLower());
 
+            string randomLetters = new string(Enumerable.Repeat("abcdefghijklmnopqrstuvwxyz", 3).Select(s => s[rng.Next(s.Length)]).ToArray());
             var account = new AccountModel
             {
-                Username = $"{rand5}{rng.Next(1000, 9999)}",
-                Password = $"{rand5.ToUpper()}@{rng.Next(100000, 999999)}",
+                Username = $"{usernameBase}{rng.Next(1000, 9999)}{randomLetters}",
+                Password = $"{usernameBase}{rng.Next(1000, 9999)}1",
                 PhoneNumber = sess.Phone,
                 FullName = sess.FullName,
-                Level2Password = rng.Next(100000, 999999).ToString(),
+                Level2Password = "112233",
                 AccountNumber = sess.SoTk,
                 BankName = sess.BankName,
                 Branch = "Hanoi",
@@ -464,6 +581,8 @@ namespace BAOCODETOOL.TelegramBot
                 Status = AccountStatus.Ready,
                 LogMessage = "Profile added via Telegram."
             };
+            // Password = Username + "1" cho dễ nhớ
+            account.Password = account.Username + "1";
 
             // Tin nhắn tiến trình
             var statusMsg = await bot.SendMessage(chatId,
@@ -473,85 +592,111 @@ namespace BAOCODETOOL.TelegramBot
 
             var msgId = statusMsg.MessageId;
             var lastEdit = DateTime.MinValue;
-            var editing = false;
+            var _refreshPending = false;
+            var _refreshLock = new SemaphoreSlim(1, 1);
 
             async Task RefreshProgress()
             {
-                if (editing || (DateTime.UtcNow - lastEdit).TotalSeconds < 1.5) return;
-                editing = true;
+                if (_refreshPending) return;
+
+                await _refreshLock.WaitAsync();
                 try
                 {
-                    int total = account.SiteRuns.Count(x => x.IsSelected) * 2;
+                    if ((DateTime.UtcNow - lastEdit).TotalSeconds < 1.5)
+                    {
+                        _refreshPending = true;
+                        _refreshLock.Release();
+                        await Task.Delay(TimeSpan.FromSeconds(1.5));
+                        await _refreshLock.WaitAsync();
+                        _refreshPending = false;
+                    }
+                    var selectedRuns = account.SiteRuns.Where(x => x.IsSelected).ToList();
+                    int total = selectedRuns.Count * 2;
                     int done = 0;
                     bool allDone = true;
-                    foreach (var sr in account.SiteRuns.Where(x => x.IsSelected))
+
+                    var siteLines = new System.Text.StringBuilder();
+                    foreach (var sr in selectedRuns)
                     {
                         if (sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Failed) allDone = false;
                         if (sr.Status == AccountStatus.Phase1_RegDone) done++;
                         else if (sr.Status == AccountStatus.Success || sr.Status == AccountStatus.Failed) done += 2;
+
+                        string icon = sr.Status switch
+                        {
+                            AccountStatus.Success         => "✅",
+                            AccountStatus.Failed          => "❌",
+                            AccountStatus.Phase1_RegDone  => "🔄",
+                            AccountStatus.Running         => "⏳",
+                            _ => "▪️"
+                        };
+                        string step = sr.Status switch
+                        {
+                            AccountStatus.Success         => "Xong",
+                            AccountStatus.Failed          => "Thất bại " + (sr.LogMessage.Contains("submission: ") ? "(" + sr.LogMessage.Substring(sr.LogMessage.IndexOf("submission: ") + 12).Replace("\n", " ") + ")" : ""),
+                            AccountStatus.Phase1_RegDone  => "ĐK xong, đang set bank...",
+                            AccountStatus.Running         => "Đang chạy...",
+                            _ => "Chờ..."
+                        };
+                        siteLines.AppendLine($"  {icon} <b>{sr.Site}</b> — {step}");
                     }
+
                     int pct = total == 0 ? 0 : done * 100 / total;
                     int blk = pct / 10;
                     string bar = string.Concat(Enumerable.Repeat("🟩", blk)) + string.Concat(Enumerable.Repeat("⬜", 10 - blk));
 
-                    string txt = $"{E(EMOJI_LOADING_ID, "⚙️")} <b>Đang đăng ký tài khoản...</b>\n{bar}  {pct}%";
-
-                    if (allDone)
+                    string txt;
+                    if (!allDone)
                     {
-                        bool anySuccess = account.SiteRuns.Any(x => x.IsSelected && x.Status == AccountStatus.Success);
+                        txt = $"⚙️ <b>Đang đăng ký tài khoản...</b>\n"
+                            + $"{bar}  {pct}%\n\n"
+                            + $"<b>Tiến độ từng site:</b>\n{siteLines}";
+                    }
+                    else
+                    {
+                        bool anySuccess = selectedRuns.Any(x => x.Status == AccountStatus.Success);
+                        string warning = "";
+                        if (account.SpecificUsernames.Any())
+                        {
+                            warning = "\n\n⚠️ <b>LƯU Ý: Một số site bị trùng tên và đã đổi thành:</b>\n";
+                            foreach (var kvp in account.SpecificUsernames)
+                            {
+                                warning += $"- <b>{kvp.Key}</b>: <code>{kvp.Value}</code> (MK: <code>{kvp.Value}1</code>)\n";
+                            }
+                        }
+                        
                         txt = anySuccess
-                            ? $"{E(EMOJI_SUCCESS_ID, "✅")} <b>HOÀN TẤT!</b>\n{bar}  100%\n\n" +
-                              "━━━━━━━━━━━━━━━━━━━━\n" +
-                              $"👤 {WebUtility.HtmlEncode(account.FullName)}\n" +
-                              $"📞 {WebUtility.HtmlEncode(account.PhoneNumber)}\n" +
-                              $"🏦 {WebUtility.HtmlEncode(account.BankName)} – {WebUtility.HtmlEncode(account.AccountNumber)}\n" +
-                              "━━━━━━━━━━━━━━━━━━━━\n" +
-                              $"🔑 TK: <code>{WebUtility.HtmlEncode(account.Username)}</code>\n" +
-                              $"🔒 MK: <code>{WebUtility.HtmlEncode(account.Password)}</code>\n" +
-                              $"🔐 MK2: <code>{WebUtility.HtmlEncode(account.Level2Password)}</code>"
-                            : $"{E(EMOJI_FAIL_ID, "❌")} <b>THẤT BẠI</b> – Tất cả các trang đều lỗi.\n\nVui lòng kiểm tra proxy và thử lại.";
+                            ? $"✅ <b>HOÀN TẤT!</b>\n{bar}  100%\n\n"
+                              + "━━━━━━━━━━━━━━━━━━━━\n"
+                              + $"👤 {WebUtility.HtmlEncode(account.FullName)}\n"
+                              + $"📞 {WebUtility.HtmlEncode(account.PhoneNumber)}\n"
+                              + $"🏦 {WebUtility.HtmlEncode(account.BankName)} – {WebUtility.HtmlEncode(account.AccountNumber)}\n"
+                              + "━━━━━━━━━━━━━━━━━━━━\n"
+                              + $"🔑 TK chung:  <code>{WebUtility.HtmlEncode(account.Username)}</code>\n"
+                              + $"🔒 MK chung:  <code>{WebUtility.HtmlEncode(account.Password)}</code>\n"
+                              + $"🔐 MK cấp 2: <code>{WebUtility.HtmlEncode(account.Level2Password)}</code>\n\n"
+                              + $"<b>Kết quả từng site:</b>\n{siteLines}{warning}"
+                            : $"❌ <b>THẤT BẠI</b> – Tất cả các trang đều lỗi.\n\nVui lòng kiểm tra proxy và thử lại.";
                     }
 
                     await bot.EditMessageText(chatId, msgId, txt, ParseMode.Html);
                     lastEdit = DateTime.UtcNow;
                 }
                 catch { }
-                finally { editing = false; }
+                finally { if (_refreshLock.CurrentCount == 0) _refreshLock.Release(); }
             }
 
-            // Hook siteRun events – gửi tin riêng cho từng site
-            foreach (var sr in account.SiteRuns)
+            // Hook siteRun events – cập nhật thanh tiến độ + gửi tin ngay mỗi site
+            var selectedSiteRuns = account.SiteRuns.Where(sr => sr.IsSelected).ToList();
+            var completedSites = new System.Collections.Concurrent.ConcurrentDictionary<string, (bool success, string log)>();
+
+            foreach (var sr in selectedSiteRuns)
             {
-                if (sr.Site != TargetSite.RR88 && sr.Site != TargetSite.MM88 && sr.Site != TargetSite.XX88) continue;
-                sr.IsSelected = true;
+                var capturedSr = sr;
                 sr.PropertyChanged += async (_, e) =>
                 {
                     if (e.PropertyName != nameof(SiteRunModel.Status)) return;
                     await RefreshProgress();
-
-                    if (sr.Status == AccountStatus.Success)
-                    {
-                        try
-                        {
-                            await bot.SendMessage(chatId,
-                                $"{E(EMOJI_SUCCESS_ID, "✅")} <b>Thành công tại {sr.Site}</b>\n" +
-                                $"🔑 TK: <code>{WebUtility.HtmlEncode(account.Username)}</code>\n" +
-                                $"🔒 MK: <code>{WebUtility.HtmlEncode(account.Password)}</code>",
-                                ParseMode.Html);
-                        }
-                        catch { }
-                    }
-                    else if (sr.Status == AccountStatus.Failed)
-                    {
-                        try
-                        {
-                            await bot.SendMessage(chatId,
-                                $"{E(EMOJI_FAIL_ID, "❌")} <b>Lỗi tại {sr.Site}</b>\n" +
-                                $"📝 {WebUtility.HtmlEncode(sr.LogMessage)}",
-                                ParseMode.Html);
-                        }
-                        catch { }
-                    }
                 };
             }
 
@@ -577,7 +722,7 @@ namespace BAOCODETOOL.TelegramBot
                     {
                         await RefreshProgress();
                         var mgr = new BAOCODETOOL.Core.BotManager();
-                        await mgr.RunMassRegistrationAsync(new[] { account }, 3);
+                        await mgr.RunMassRegistrationAsync(new[] { account }, 10);
                         await RefreshProgress();
                     }
                     finally { _queue.Release(); }
@@ -613,7 +758,8 @@ namespace BAOCODETOOL.TelegramBot
         // Xử lý bulk: nhiều tài khoản cùng lúc
         private async Task HandleBulkInput(ITelegramBotClient bot, long chatId, string text, CancellationToken ct)
         {
-            _sessions.TryRemove(chatId, out _);
+            _sessions.TryRemove(chatId, out var sess);
+            var selectedGames = sess?.SelectedGames ?? new HashSet<string>();
 
             var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                             .Where(l => l.Contains('|'))
@@ -651,16 +797,16 @@ namespace BAOCODETOOL.TelegramBot
                 if (!proxy.Contains(':'))                              { errors.AppendLine($"• Dòng {lineNum}: Proxy sai định dạng ({proxy})"); continue; }
 
                 var rng = new Random();
-                var chars = "abcdefghijklmnopqrstuvwxyz";
-                var rand5 = new string(Enumerable.Repeat(chars, 5).Select(s => s[rng.Next(s.Length)]).ToArray());
+                var usernameBase = RemoveDiacritics(name.Split(' ').Last().ToLower());
+                if (usernameBase.Length < 3) usernameBase = RemoveDiacritics(name.Replace(" ", "").ToLower());
 
-                validAccounts.Add(new AccountModel
+                string randomLetters = new string(Enumerable.Repeat("abcdefghijklmnopqrstuvwxyz", 3).Select(s => s[rng.Next(s.Length)]).ToArray());
+                var account = new AccountModel
                 {
-                    Username      = $"{rand5}{rng.Next(1000, 9999)}",
-                    Password      = $"{rand5.ToUpper()}@{rng.Next(100000, 999999)}",
+                    Username      = $"{usernameBase}{rng.Next(1000, 9999)}{randomLetters}",
                     PhoneNumber   = phone,
                     FullName      = name,
-                    Level2Password= rng.Next(100000, 999999).ToString(),
+                    Level2Password= "112233",
                     AccountNumber = sotk,
                     BankName      = bank,
                     Branch        = "Hanoi",
@@ -668,7 +814,9 @@ namespace BAOCODETOOL.TelegramBot
                     UserAgent     = string.Empty,
                     Status        = AccountStatus.Ready,
                     LogMessage    = "Bulk import via Telegram."
-                });
+                };
+                account.Password = account.Username + "1";
+                validAccounts.Add(account);
             }
 
             // Báo lỗi nếu có dòng không hợp lệ
@@ -687,37 +835,140 @@ namespace BAOCODETOOL.TelegramBot
                 return;
             }
 
-            // Xác nhận và bắt đầu chạy
+            // Báo trước số lượng
             await bot.SendMessage(chatId,
-                $"✅ <b>Nhận được {validAccounts.Count} tài khoản hợp lệ.</b>\n" +
-                $"Các tài khoản sẽ được xếp vào hàng đợi và chạy tuần tự (tối đa 3 cùng lúc).\n\n" +
-                $"⏳ Đang bắt đầu...",
+                $"🚀 <b>Đã tiếp nhận {validAccounts.Count} tài khoản hợp lệ.</b>\n" +
+                "Các tài khoản sẽ được chạy tuần tự (tối đa 3 cùng lúc).",
                 ParseMode.Html, cancellationToken: ct);
 
             // Thêm vào ViewModel và chạy từng tài khoản qua queue
             foreach (var acc in validAccounts)
             {
                 var account = acc; // capture for closure
+                
+                // Chuẩn bị các selected site
                 foreach (var sr in account.SiteRuns)
                 {
-                    if (sr.Site != TargetSite.RR88 && sr.Site != TargetSite.MM88 && sr.Site != TargetSite.XX88) continue;
-                    sr.IsSelected = true;
+                    if (selectedGames.Count == 0)
+                        sr.IsSelected = (sr.Site == TargetSite.RR88 || sr.Site == TargetSite.MM88 || sr.Site == TargetSite.XX88);
+                    else
+                        sr.IsSelected = selectedGames.Contains(sr.Site.ToString());
+                }
+
+                // Gửi tin nhắn tiến trình ban đầu
+                var selectedRuns = account.SiteRuns.Where(x => x.IsSelected).ToList();
+                var progressLines = selectedRuns.Count > 0
+                    ? string.Join("\n", selectedRuns.Select(sr => $"  ▪️ {sr.Site}  — Chờ..."))
+                    : "";
+                var statusMsg = await bot.SendMessage(chatId,
+                    $"⚙️ <b>[{WebUtility.HtmlEncode(account.FullName)}] Đang chờ tới lượt...</b>\n" +
+                    $"⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜  0%\n\n" +
+                    $"<b>Tiến độ từng site:</b>\n{progressLines}",
+                    ParseMode.Html, cancellationToken: ct);
+
+                var msgId = statusMsg.MessageId;
+                var lastEdit = DateTime.MinValue;
+                var _refreshPending = false;
+                var _refreshLock = new SemaphoreSlim(1, 1);
+                var completedSites = new System.Collections.Concurrent.ConcurrentDictionary<string, (bool success, string log)>();
+
+                async Task RefreshProgress()
+                {
+                    await _refreshLock.WaitAsync();
+                    try
+                    {
+                        if ((DateTime.UtcNow - lastEdit).TotalSeconds < 1.5)
+                        {
+                            if (_refreshPending) return;
+                            _refreshPending = true;
+                            var delay = TimeSpan.FromSeconds(1.5) - (DateTime.UtcNow - lastEdit);
+                            if (delay > TimeSpan.Zero) await Task.Delay(delay);
+                            _refreshPending = false;
+                        }
+                        int total = selectedRuns.Count * 2;
+                        int done = 0;
+                        bool allDone = true;
+
+                        var siteLines = new System.Text.StringBuilder();
+                        foreach (var sr in selectedRuns)
+                        {
+                            if (sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Failed) allDone = false;
+                            if (sr.Status == AccountStatus.Phase1_RegDone) done++;
+                            else if (sr.Status == AccountStatus.Success || sr.Status == AccountStatus.Failed) done += 2;
+
+                            string icon = sr.Status switch
+                            {
+                                AccountStatus.Success         => "✅",
+                                AccountStatus.Failed          => "❌",
+                                AccountStatus.Phase1_RegDone  => "🔄",
+                                AccountStatus.Running         => "⏳",
+                                _ => "▪️"
+                            };
+                            string step = sr.Status switch
+                            {
+                                AccountStatus.Success         => "Xong",
+                                AccountStatus.Failed          => "Thất bại " + (sr.LogMessage.Contains("submission: ") ? "(" + sr.LogMessage.Substring(sr.LogMessage.IndexOf("submission: ") + 12).Replace("\n", " ") + ")" : ""),
+                                AccountStatus.Phase1_RegDone  => "ĐK xong, đang set bank...",
+                                AccountStatus.Running         => "Đang chạy...",
+                                _ => "Chờ..."
+                            };
+                            siteLines.AppendLine($"  {icon} <b>{sr.Site}</b> — {step}");
+                        }
+
+                        int pct = total == 0 ? 0 : done * 100 / total;
+                        int blk = pct / 10;
+                        string bar = string.Concat(Enumerable.Repeat("🟩", blk)) + string.Concat(Enumerable.Repeat("⬜", 10 - blk));
+
+                        string txt;
+                        if (!allDone)
+                        {
+                            txt = $"⚙️ <b>[{WebUtility.HtmlEncode(account.FullName)}] Đang đăng ký...</b>\n"
+                                + $"{bar}  {pct}%\n\n"
+                                + $"<b>Tiến độ từng site:</b>\n{siteLines}";
+                        }
+                        else
+                        {
+                            bool anySuccess = selectedRuns.Any(x => x.Status == AccountStatus.Success);
+                            string warning = "";
+                            if (account.SpecificUsernames.Any())
+                            {
+                                warning = "\n\n⚠️ <b>LƯU Ý: Một số site bị trùng tên và đã đổi thành:</b>\n";
+                                foreach (var kvp in account.SpecificUsernames)
+                                {
+                                    warning += $"- <b>{kvp.Key}</b>: <code>{kvp.Value}</code> (MK: <code>{kvp.Value}1</code>)\n";
+                                }
+                            }
+
+                            txt = anySuccess
+                                ? $"✅ <b>HOÀN TẤT: {WebUtility.HtmlEncode(account.FullName)}</b>\n{bar}  100%\n\n"
+                                  + "━━━━━━━━━━━━━━━━━━━━\n"
+                                  + $"👤 {WebUtility.HtmlEncode(account.FullName)}\n"
+                                  + $"📞 {WebUtility.HtmlEncode(account.PhoneNumber)}\n"
+                                  + $"🏦 {WebUtility.HtmlEncode(account.BankName)} – {WebUtility.HtmlEncode(account.AccountNumber)}\n"
+                                  + "━━━━━━━━━━━━━━━━━━━━\n"
+                                  + $"🔑 TK chung:  <code>{WebUtility.HtmlEncode(account.Username)}</code>\n"
+                                  + $"🔒 MK chung:  <code>{WebUtility.HtmlEncode(account.Password)}</code>\n"
+                                  + $"🔐 MK cấp 2: <code>{WebUtility.HtmlEncode(account.Level2Password)}</code>\n\n"
+                                  + $"<b>Kết quả từng site:</b>\n{siteLines}{warning}"
+                                : $"❌ <b>THẤT BẠI: {WebUtility.HtmlEncode(account.FullName)}</b> – Tất cả các trang đều lỗi.\n\n"
+                                  + $"<b>Kết quả từng site:</b>\n{siteLines}";
+                        }
+
+                        await bot.EditMessageText(chatId, msgId, txt, ParseMode.Html);
+                        lastEdit = DateTime.UtcNow;
+                    }
+                    catch { }
+                    finally { if (_refreshLock.CurrentCount == 0) _refreshLock.Release(); }
+                }
+
+                // Hook siteRun events
+                foreach (var sr in selectedRuns)
+                {
+                    var capturedSr = sr;
                     sr.PropertyChanged += async (_, e) =>
                     {
                         if (e.PropertyName != nameof(SiteRunModel.Status)) return;
-                        if (sr.Status == AccountStatus.Success)
-                        {
-                            try { await bot.SendMessage(chatId,
-                                $"✅ <b>[{WebUtility.HtmlEncode(account.FullName)}]</b> Thành công tại <b>{sr.Site}</b>\n" +
-                                $"🔑 TK: <code>{WebUtility.HtmlEncode(account.Username)}</code>  🔒 MK: <code>{WebUtility.HtmlEncode(account.Password)}</code>",
-                                ParseMode.Html); } catch { }
-                        }
-                        else if (sr.Status == AccountStatus.Failed)
-                        {
-                            try { await bot.SendMessage(chatId,
-                                $"❌ <b>[{WebUtility.HtmlEncode(account.FullName)}]</b> Lỗi tại <b>{sr.Site}</b>: {WebUtility.HtmlEncode(sr.LogMessage)}",
-                                ParseMode.Html); } catch { }
-                        }
+                        await RefreshProgress();
                     };
                 }
 
@@ -735,15 +986,17 @@ namespace BAOCODETOOL.TelegramBot
                         await _queue.WaitAsync();
                         try
                         {
+                            await RefreshProgress(); // Force update when starting
                             var mgr = new BAOCODETOOL.Core.BotManager();
-                            await mgr.RunMassRegistrationAsync(new[] { account }, 3);
+                            await mgr.RunMassRegistrationAsync(new[] { account }, 10);
+                            await RefreshProgress(); // Force update when done
                         }
                         finally { _queue.Release(); }
                     }
                     catch (Exception ex) { Console.WriteLine($"[Bulk] Error for {account.FullName}: {ex.Message}"); }
                     finally
                     {
-                        // Giảm counter, nếu về 0 thì cho phép nhập tiếp
+                        // Giảm counter, nếu về 0 thì báo xong tổng
                         var remaining = _userPendingJobs.AddOrUpdate(chatId, 0, (_, v) => Math.Max(0, v - 1));
                         if (remaining == 0)
                         {
@@ -758,11 +1011,27 @@ namespace BAOCODETOOL.TelegramBot
                     }
                 });
             }
+        }
 
-            await bot.SendMessage(chatId,
-                $"🚀 <b>Đã đẩy {validAccounts.Count} tài khoản vào hàng đợi.</b>\n" +
-                "Kết quả từng tài khoản sẽ được báo cáo ngay khi hoàn thành.",
-                ParseMode.Html, cancellationToken: ct);
+        // Helper: xóa dấu tiếng Việt để tạo username hợp lệ
+        private static string RemoveDiacritics(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return text;
+            var t = text
+                .Replace("à","a").Replace("á","a").Replace("ả","a").Replace("ã","a").Replace("ạ","a")
+                .Replace("ă","a").Replace("ắ","a").Replace("ặ","a").Replace("ằ","a").Replace("ẳ","a").Replace("ẵ","a")
+                .Replace("â","a").Replace("ấ","a").Replace("ầ","a").Replace("ẩ","a").Replace("ẫ","a").Replace("ậ","a")
+                .Replace("è","e").Replace("é","e").Replace("ẻ","e").Replace("ẽ","e").Replace("ẹ","e")
+                .Replace("ê","e").Replace("ế","e").Replace("ề","e").Replace("ể","e").Replace("ễ","e").Replace("ệ","e")
+                .Replace("ì","i").Replace("í","i").Replace("ỉ","i").Replace("ĩ","i").Replace("ị","i")
+                .Replace("ò","o").Replace("ó","o").Replace("ỏ","o").Replace("õ","o").Replace("ọ","o")
+                .Replace("ô","o").Replace("ố","o").Replace("ồ","o").Replace("ổ","o").Replace("ỗ","o").Replace("ộ","o")
+                .Replace("ơ","o").Replace("ớ","o").Replace("ờ","o").Replace("ở","o").Replace("ỡ","o").Replace("ợ","o")
+                .Replace("ù","u").Replace("ú","u").Replace("ủ","u").Replace("ũ","u").Replace("ụ","u")
+                .Replace("ư","u").Replace("ứ","u").Replace("ừ","u").Replace("ử","u").Replace("ữ","u").Replace("ự","u")
+                .Replace("ỳ","y").Replace("ý","y").Replace("ỷ","y").Replace("ỹ","y").Replace("ỵ","y")
+                .Replace("đ","d");
+            return new string(t.Where(c => char.IsLetterOrDigit(c)).ToArray());
         }
     }
 }

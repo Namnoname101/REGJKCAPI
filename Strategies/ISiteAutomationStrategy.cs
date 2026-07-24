@@ -1,8 +1,8 @@
-using OpenQA.Selenium;
-using VibecodeReg.Core;
-using VibecodeReg.Models;
+﻿using OpenQA.Selenium;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Strategies;
+namespace BAOCODETOOL.Strategies;
 
 public interface ISiteAutomationStrategy
 {

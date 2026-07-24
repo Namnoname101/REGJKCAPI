@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
-using VibecodeReg.Models;
-using VibecodeReg.Strategies;
+using BAOCODETOOL.Models;
+using BAOCODETOOL.Strategies;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public sealed class BotManager
 {
@@ -53,11 +53,11 @@ public sealed class BotManager
 
         try
         {
-        var jobs = profiles
-            .Where(account => account.SiteRuns.Any(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone))
+        var activeAccounts = profiles
+            .Where(a => a.SiteRuns.Any(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone))
             .ToList();
 
-        if (jobs.Count == 0)
+        if (activeAccounts.Count == 0)
         {
             return;
         }
@@ -65,7 +65,22 @@ public sealed class BotManager
         maxThreads = Math.Max(1, maxThreads);
 
         using var semaphore = new SemaphoreSlim(maxThreads);
-        var tasks = jobs.Select(account => RunJobAsync(account, semaphore, executionContext, onSiteCompleted));
+        var tasks = new List<Task>();
+        
+        foreach (var account in activeAccounts)
+        {
+            tasks.Add(RunAccountSitesConcurrentlyAsync(account, semaphore, executionContext, onSiteCompleted));
+            
+            try 
+            {
+                // Delay 4s between starting each account to stagger browser launches
+                await Task.Delay(TimeSpan.FromSeconds(4), executionContext.CancellationToken);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+        }
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
     }
@@ -75,42 +90,51 @@ public sealed class BotManager
     }
 }
 
-private async Task RunJobAsync(
+private async Task RunAccountSitesConcurrentlyAsync(
     AccountModel account,
     SemaphoreSlim semaphore,
     AutomationExecutionContext executionContext,
     Action? onSiteCompleted)
 {
-    var slotAcquired = false;
-    var pendingSites = account.SiteRuns
+    var siteRuns = account.SiteRuns
         .Where(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone)
         .ToList();
+
+    foreach (var siteRun in siteRuns)
+    {
+        if (executionContext.CancellationToken.IsCancellationRequested) break;
+        await RunJobAsync(account, siteRun, semaphore, executionContext, onSiteCompleted);
+    }
+}
+
+private async Task RunJobAsync(
+    AccountModel account,
+    SiteRunModel siteRun,
+    SemaphoreSlim semaphore,
+    AutomationExecutionContext executionContext,
+    Action? onSiteCompleted)
+{
+    var slotAcquired = false;
 
     try
     {
         executionContext.Checkpoint();
-        foreach (var sr in pendingSites)
-        {
-            AutomationUi.SetSiteStatus(account, sr, AccountStatus.Running, "Queued. Waiting for browser slot...");
-        }
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Queued. Waiting for browser slot...");
 
         await semaphore.WaitAsync(executionContext.CancellationToken).ConfigureAwait(false);
         slotAcquired = true;
 
         executionContext.Checkpoint();
         await Task.Run(
-                () => RunAccountRegistration(account, executionContext, onSiteCompleted),
+                () => RunSingleSiteExecution(account, siteRun, executionContext, onSiteCompleted),
                 executionContext.CancellationToken)
             .ConfigureAwait(false);
     }
     catch (OperationCanceledException) when (executionContext.CancellationToken.IsCancellationRequested)
     {
-        foreach (var sr in pendingSites)
+        if (siteRun.Status == AccountStatus.Running || siteRun.Status == AccountStatus.Ready)
         {
-            if (sr.Status == AccountStatus.Running || sr.Status == AccountStatus.Ready)
-            {
-                AutomationUi.SetSiteStatus(account, sr, AccountStatus.Stopped, "Stopped by operator.");
-            }
+            AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Stopped, "Stopped by operator.");
         }
     }
     finally
@@ -122,57 +146,20 @@ private async Task RunJobAsync(
     }
 }
 
-private static void RunAccountRegistration(
+private static void RunSingleSiteExecution(
     AccountModel account,
+    SiteRunModel siteRun,
     AutomationExecutionContext executionContext,
     Action? onSiteCompleted)
 {
-    var siteRunsToRun = account.SiteRuns
-        .Where(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone)
-        .ToList();
-
-    if (siteRunsToRun.Count == 0) return;
-
     try
     {
         executionContext.Checkpoint();
-        foreach (var sr in siteRunsToRun)
-        {
-            AutomationUi.SetSiteStatus(account, sr, AccountStatus.Running, "Launching browser profile...");
-        }
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Launching browser profile...");
 
-        using IWebDriver driver = DriverFactory.CreateDriver(account);
+        using IWebDriver driver = DriverFactory.CreateDriver(account, siteRun.Site);
 
-        bool isFirstTab = true;
-
-        foreach (var siteRun in siteRunsToRun)
-        {
-            try
-            {
-                if (executionContext.CancellationToken.IsCancellationRequested)
-                {
-                    throw new OperationCanceledException(executionContext.CancellationToken);
-                }
-
-                if (!isFirstTab)
-                {
-                    AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Opening new tab...");
-                    ((IJavaScriptExecutor)driver).ExecuteScript("window.open();");
-                    driver.SwitchTo().Window(driver.WindowHandles.Last());
-                }
-                isFirstTab = false;
-
-                RunSingleSiteInBrowser(driver, account, siteRun, executionContext);
-            }
-            catch (OperationCanceledException)
-            {
-                throw;
-            }
-            finally
-            {
-                onSiteCompleted?.Invoke();
-            }
-        }
+        RunSingleSiteInBrowser(driver, account, siteRun, executionContext);
     }
     catch (OperationCanceledException)
     {
@@ -180,10 +167,11 @@ private static void RunAccountRegistration(
     }
     catch (Exception ex)
     {
-        foreach (var sr in siteRunsToRun.Where(s => s.Status == AccountStatus.Running || s.Status == AccountStatus.Ready))
-        {
-            AutomationUi.SetSiteStatus(account, sr, AccountStatus.Failed, $"Browser error: {ex.Message}");
-        }
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, $"Browser error: {ex.Message}");
+    }
+    finally
+    {
+        onSiteCompleted?.Invoke();
     }
 }
 
@@ -198,9 +186,37 @@ private static void RunSingleSiteInBrowser(
         executionContext.Checkpoint();
         var strategy = StrategyFactory.Create(siteRun.Site);
 
-        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Executing registration phase...");
-        executionContext.Checkpoint();
-        var registrationSucceeded = strategy.ExecuteRegistration(driver, account, siteRun, executionContext);
+        bool registrationSucceeded = false;
+        for (int attempt = 1; attempt <= 2; attempt++)
+        {
+            AutomationUi.SetSiteStatus(account, siteRun, logMessage: $"Executing registration phase (Attempt {attempt})...");
+            executionContext.Checkpoint();
+            registrationSucceeded = strategy.ExecuteRegistration(driver, account, siteRun, executionContext);
+            
+            if (registrationSucceeded) break;
+
+            if (siteRun.Status == AccountStatus.Failed && 
+                (siteRun.LogMessage.Contains("tên", StringComparison.OrdinalIgnoreCase) || 
+                 siteRun.LogMessage.Contains("tài khoản", StringComparison.OrdinalIgnoreCase) ||
+                 siteRun.LogMessage.Contains("tồn tại", StringComparison.OrdinalIgnoreCase)) &&
+                 !siteRun.LogMessage.Contains("số điện thoại", StringComparison.OrdinalIgnoreCase) &&
+                 !siteRun.LogMessage.Contains("phone", StringComparison.OrdinalIgnoreCase))
+            {
+                // Thay đổi username riêng cho site này
+                var rng = new Random();
+                var newUsername = account.GetUsername(siteRun.Site) + rng.Next(10, 99).ToString();
+                account.SpecificUsernames[siteRun.Site] = newUsername;
+                
+                AutomationUi.SetSiteStatus(account, siteRun, logMessage: $"Username existed. Retrying with {newUsername}...");
+                try { driver.Navigate().Refresh(); } catch { }
+                executionContext.Delay(TimeSpan.FromSeconds(2));
+                continue;
+            }
+
+            // Lỗi khác thì thoát luôn
+            break;
+        }
+
         if (!registrationSucceeded)
         {
             if (siteRun.Status != AccountStatus.Failed)

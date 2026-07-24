@@ -1,7 +1,7 @@
-using OpenQA.Selenium.Chrome;
+﻿using OpenQA.Selenium.Chrome;
 using System.Threading;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 internal sealed class ManagedChromeDriver : ChromeDriver
 {

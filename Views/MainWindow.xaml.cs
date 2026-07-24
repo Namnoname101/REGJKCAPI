@@ -1,12 +1,12 @@
-using System;
+﻿using System;
 using System.Text.RegularExpressions;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Media;
-using VibecodeReg.ViewModels;
+using BAOCODETOOL.ViewModels;
 
-namespace VibecodeReg.Views;
+namespace BAOCODETOOL.Views;
 
 public partial class MainWindow : Window
 {

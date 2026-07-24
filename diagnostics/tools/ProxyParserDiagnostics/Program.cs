@@ -1,4 +1,4 @@
-using VibecodeReg.Core;
+﻿using BAOCODETOOL.Core;
 
 var cases = new[]
 {
@@ -38,3 +38,4 @@ if (failures > 0)
 }
 
 sealed record ParserCase(string Name, string Input, bool ShouldParse, bool ShouldAuthenticate);
+

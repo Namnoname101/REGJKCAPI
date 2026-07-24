@@ -6,7 +6,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Linq;
 
-namespace VibecodeReg.Models;
+namespace BAOCODETOOL.Models;
 
 public partial class AccountModel : ObservableObject
 {
@@ -29,6 +29,11 @@ public partial class AccountModel : ObservableObject
 
     [ObservableProperty]
     private string _username = string.Empty;
+    
+    public System.Collections.Concurrent.ConcurrentDictionary<TargetSite, string> SpecificUsernames { get; } = new();
+    
+    public string GetUsername(TargetSite site) => SpecificUsernames.TryGetValue(site, out var u) ? u : Username;
+    public string GetPassword(TargetSite site) => SpecificUsernames.TryGetValue(site, out var u) ? u + "1" : Password;
 
     [ObservableProperty]
     private string _password = string.Empty;

@@ -1,7 +1,7 @@
-using System;
+﻿using System;
 using System.Net;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public static class ProxyConfigurationParser
 {

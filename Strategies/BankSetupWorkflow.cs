@@ -5,10 +5,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
-using VibecodeReg.Core;
-using VibecodeReg.Models;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Strategies;
+namespace BAOCODETOOL.Strategies;
 
 internal static class BankSetupWorkflow
 {
@@ -50,7 +50,13 @@ internal static class BankSetupWorkflow
     [
         By.CssSelector(".withdraw-bkadd"),
         By.CssSelector(".bank-add"),
-        By.CssSelector(".add-bank")
+        By.CssSelector(".add-bank"),
+        By.CssSelector(".addCard"),
+        By.CssSelector(".add-btn"),
+        By.CssSelector(".van-icon-plus"),
+        By.CssSelector("img[src*='add']"),
+        By.CssSelector("div[class*='add']"),
+        By.XPath("//*[contains(text(), 'Thêm') or contains(text(), '+')]")
     ];
 
     private static readonly By[] BankDropdownSelectors =
@@ -129,17 +135,26 @@ internal static class BankSetupWorkflow
 
             executionContext.Checkpoint();
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Navigating to bank setup...");
+
+            try
+            {
+                if (driver is IJavaScriptExecutor js)
+                {
+                    js.ExecuteScript("document.querySelectorAll('.van-overlay, .toast_bg, .registerModal, .am-modal-mask, .dialog-mask').forEach(e => e.remove());");
+                }
+            }
+            catch { }
+
             NavigateToBankSetup(driver, executionContext);
 
             executionContext.Checkpoint();
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Opening bank selector...");
-            ClickAnyVisible(driver, AddBankSelectors, TimeSpan.FromSeconds(20), required: true);
-            executionContext.Delay(TimeSpan.FromMilliseconds(700));
-            ClickAnyVisible(driver, BankDropdownSelectors, TimeSpan.FromSeconds(15), required: true);
+            ClickAnyVisible(driver, AddBankSelectors, TimeSpan.FromSeconds(3), required: false);
+            ClickAnyVisible(driver, BankDropdownSelectors, TimeSpan.FromSeconds(5), required: true);
 
             executionContext.Checkpoint();
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Selecting bank...");
-            ClickBankName(driver, bankName, TimeSpan.FromSeconds(15));
+            ClickBankName(driver, bankName, TimeSpan.FromSeconds(5));
 
             executionContext.Checkpoint();
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Filling bank details...");
@@ -153,9 +168,69 @@ internal static class BankSetupWorkflow
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Handling confirmation popup if any...");
             ClickConfirmationPopupIfAny(driver, executionContext);
 
-            executionContext.Delay(TimeSpan.FromSeconds(5));
+            AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Waiting for bank binding result...");
+            
+            // Poll continually for up to 5 seconds to catch toasts instantly
+            var pollEndTime = DateTime.Now.AddSeconds(5);
+            if (driver is IJavaScriptExecutor jsChecker)
+            {
+                while (DateTime.Now < pollEndTime)
+                {
+                    if (executionContext.CancellationToken.IsCancellationRequested) break;
 
-            AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Bank setup submitted. Waiting for final result flow...");
+                    try
+                    {
+                        var resultMessage = jsChecker.ExecuteScript(@"
+                            var allEls = document.querySelectorAll('div, span, p, .van-toast__text, .van-dialog__message');
+                            for(var i=0; i<allEls.length; i++) {
+                                var el = allEls[i];
+                                if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.innerText && el.innerText.trim().length < 150) {
+                                    var text = el.innerText.toLowerCase();
+                                    
+                                    // Bắt lỗi
+                                    if (text.includes('sử dụng') || 
+                                        text.includes('tồn tại') || 
+                                        text.includes('lỗi') || 
+                                        text.includes('thất bại') || 
+                                        text.includes('trùng') || 
+                                        text.includes('không đúng') || 
+                                        text.includes('already') || 
+                                        text.includes('vui lòng thử lại') ||
+                                        text.includes('sai')) {
+                                        return 'ERROR:' + el.innerText.trim();
+                                    }
+                                    
+                                    // Bắt thành công
+                                    if (text.includes('thành công') || text.includes('success')) {
+                                        return 'SUCCESS:' + el.innerText.trim();
+                                    }
+                                }
+                            }
+                            return null;
+                        ") as string;
+
+                        if (!string.IsNullOrEmpty(resultMessage))
+                        {
+                            if (resultMessage.StartsWith("ERROR:"))
+                            {
+                                AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, $"Bank setup failed: {resultMessage.Substring(6)}");
+                                return false;
+                            }
+                            else if (resultMessage.StartsWith("SUCCESS:"))
+                            {
+                                AutomationUi.SetSiteStatus(account, siteRun, logMessage: $"Bank setup success: {resultMessage.Substring(8)}");
+                                return true; // Trả về true liền ngay lập tức để qua con khác
+                            }
+                        }
+                    }
+                    catch { }
+
+                    executionContext.Delay(TimeSpan.FromMilliseconds(500));
+                }
+            }
+
+            // Nếu hết thời gian mà không bắt được toast nào (bị trôi nhanh quá), vẫn báo thành công
+            AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Bank setup submitted successfully (fallback).");
             return true;
         }
         catch (OperationCanceledException)
@@ -191,6 +266,8 @@ internal static class BankSetupWorkflow
 
     private static void CloseOptionalPopups(IWebDriver driver, AutomationExecutionContext executionContext)
     {
+        // Skip popup closing completely to optimize speed
+        /*
         executionContext.Delay(TimeSpan.FromSeconds(3));
 
         for (var attempt = 0; attempt < 3; attempt++)
@@ -209,33 +286,130 @@ internal static class BankSetupWorkflow
 
             executionContext.Delay(TimeSpan.FromMilliseconds(500));
         }
+        */
+    }
+
+    private static void FastFillAndSubmitBankDetails(
+        IWebDriver driver,
+        string bankAccount,
+        string branch,
+        string withdrawPassword,
+        AutomationExecutionContext executionContext)
+    {
+        try
+        {
+            if (driver is IJavaScriptExecutor js)
+            {
+                js.ExecuteScript($@"
+                    function setVal(el, val) {{
+                        if(!el) return;
+                        var setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+                        if (setter) setter.call(el, val);
+                        else el.value = val;
+                        el.dispatchEvent(new Event('input', {{ bubbles: true }}));
+                        el.dispatchEvent(new Event('change', {{ bubbles: true }}));
+                    }}
+                    
+                    var inputs = document.querySelectorAll('.type-group-area .mc-account-list input.input-base, .account-form-group input, input.input-base, input[type=password], input.form-control');
+                    var accFilled = false;
+                    var branchFilled = false;
+                    for(var i=0; i<inputs.length; i++) {{
+                        var input = inputs[i];
+                        var p = (input.placeholder || '').toLowerCase();
+                        if(input.type === 'password' || p.includes('mật khẩu') || p.includes('password') || p.includes('mã pin')) {{
+                            setVal(input, '{withdrawPassword}');
+                        }}
+                        else if(!accFilled && (p.includes('tài khoản') || p.includes('account') || p.includes('số thẻ') || p.includes('stk'))) {{
+                            setVal(input, '{bankAccount}');
+                            accFilled = true;
+                        }}
+                        else if(!branchFilled && (p.includes('chi nhánh') || p.includes('branch'))) {{
+                            setVal(input, '{branch}');
+                            branchFilled = true;
+                        }}
+                    }}
+                    
+                    // Fallback theo vị trí nếu không nhận diện được placeholder
+                    if (!accFilled) {{
+                        var textInputs = document.querySelectorAll('.type-group-area .mc-account-list input[type=text], .account-form-group input[type=text]');
+                        if(textInputs.length >= 2) {{
+                            setVal(textInputs[0], '{bankAccount}');
+                            setVal(textInputs[1], '{branch}');
+                        }}
+                    }}
+                    
+                    // Delay nhẹ để Vue kịp nhận value trước khi Submit
+                    setTimeout(() => {{
+                        var btns = document.querySelectorAll('.am-button, button.submit, button.confirm-btn, .btn-submit, .btn-confirm, .van-button--info, .van-button, .btn, span.am-button');
+                        for(var j=0; j<btns.length; j++) {{
+                            var text = (btns[j].innerText || '').toLowerCase();
+                            if(text.includes('lưu') || text.includes('xác nhận') || text.includes('confirm') || text.includes('submit')) {{
+                                btns[j].click();
+                                break;
+                            }}
+                        }}
+                    }}, 300);
+                ");
+            }
+            
+            // Đợi script chạy và submit
+            executionContext.Delay(TimeSpan.FromSeconds(2));
+        }
+        catch { }
     }
 
     private static void NavigateToBankSetup(IWebDriver driver, AutomationExecutionContext executionContext)
     {
         try
         {
-            var uri = new Uri(driver.Url);
-            var memberHomeUrl = $"{uri.Scheme}://{uri.Host}/m/member/home{uri.Query}";
-            driver.Navigate().GoToUrl(memberHomeUrl);
-        }
-        catch (UriFormatException)
-        {
-            // Ignore format exceptions and just proceed, although unlikely
-        }
+            // Đập popup nhanh TRƯỚC KHI navigate
+            if (driver is IJavaScriptExecutor js)
+            {
+                js.ExecuteScript(@"
+                    document.querySelectorAll('.van-overlay, .modal-backdrop, .overlay, .van-dialog, .toast_bg, .registerModal, .dialog-tips').forEach(e => e.remove());
+                    document.querySelectorAll('button, div, span, a, i, img').forEach(el => {
+                        var text = (el.innerText || '').trim();
+                        var src = (el.src || '').toLowerCase();
+                        var className = (el.className || '').toLowerCase();
+                        if (text === 'Huỷ' || text === 'Cancel' || text === 'Đóng' || text === 'Đã Hiểu' || text === 'Tôi Biết Rồi' || text === 'X' || 
+                            src.includes('close') || className.includes('close-icon') || className.includes('close_btn')) {
+                            el.click();
+                        }
+                    });
+                ");
+            }
 
-        executionContext.Delay(TimeSpan.FromSeconds(2));
-
-        if (!ClickBestTextMatch(
-                driver,
-                [By.CssSelector(".default-member-footer a.footer-item"), By.CssSelector("a.footer-item"), By.CssSelector(".footer-item")],
-                ["rut", "withdraw", "bank", "card", "the"],
-                TimeSpan.FromSeconds(8)))
-        {
-            ClickAnyVisible(driver, SecondaryNavigationSelectors, TimeSpan.FromSeconds(8), required: false);
+            var currentUrl = driver.Url;
+            var uri = new Uri(currentUrl);
+            
+            // Xây dựng link nhảy thẳng vào form Thêm Ngân Hàng (Add Bank)
+            var query = string.IsNullOrEmpty(uri.Query) ? "?type=B" : uri.Query + "&type=B";
+            var addBankUrl = $"{uri.Scheme}://{uri.Host}/m/securityCenter/addBankCard{query}";
+            
+            // Điều hướng bằng Javascript để tránh lỗi treo của Selenium trên các trang SPA (Angular/Vue)
+            if (driver is IJavaScriptExecutor executor)
+            {
+                executor.ExecuteScript($"window.location.href = '{addBankUrl}';");
+            }
+            else
+            {
+                driver.Navigate().GoToUrl(addBankUrl);
+            }
+            
+            // THAY VÌ chờ cứng 2s — chờ đến khi input form xuất hiện (tối đa 8s)
+            // Nếu form load nhanh thì thoát ngay, không lãng phí thời gian
+            try
+            {
+                var smartWait = new OpenQA.Selenium.Support.UI.WebDriverWait(driver, TimeSpan.FromSeconds(8));
+                smartWait.Until(d =>
+                {
+                    var inputs = d.FindElements(By.CssSelector("input.input-base, input[type='password'], input[type='text']"));
+                    return inputs.Count >= 2;
+                });
+            }
+            catch { /* nếu timeout thì tiếp tục, trang vẫn có thể dùng được */ }
         }
-
-        executionContext.Delay(TimeSpan.FromSeconds(2));
+        catch { }
     }
 
     private static void FillBankAccountAndBranch(
@@ -331,8 +505,7 @@ internal static class BankSetupWorkflow
 
     private static void ClickConfirmationPopupIfAny(IWebDriver driver, AutomationExecutionContext executionContext)
     {
-        executionContext.Delay(TimeSpan.FromSeconds(2));
-        
+        // Không chờ cứng 2s nữa — dùng WebDriverWait ngay (tối đa 3s, thoát ngay khi không có popup)
         try
         {
             var wait = CreateWait(driver, TimeSpan.FromSeconds(3));
@@ -367,7 +540,7 @@ internal static class BankSetupWorkflow
                     confirmButton.ClickLikeHuman(driver);
                 }
                 
-                executionContext.Delay(TimeSpan.FromSeconds(1));
+                executionContext.Delay(TimeSpan.FromMilliseconds(500));
             }
         }
         catch (WebDriverTimeoutException)

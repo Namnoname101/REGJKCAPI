@@ -1,11 +1,11 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
-using VibecodeReg.Models;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public static class ProfileStore
 {

@@ -1,9 +1,9 @@
-using OpenQA.Selenium;
+﻿using OpenQA.Selenium;
 using System;
 using System.Diagnostics;
 using System.Threading;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 internal static class ProxyAuthenticationBootstrapper
 {

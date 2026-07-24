@@ -1,4 +1,4 @@
-namespace VibecodeReg.Models;
+﻿namespace BAOCODETOOL.Models;
 
 public enum AccountStatus
 {

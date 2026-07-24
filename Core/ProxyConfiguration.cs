@@ -1,7 +1,7 @@
-using System;
+﻿using System;
 using System.Linq;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 public sealed record ProxyConfiguration(
     string Scheme,

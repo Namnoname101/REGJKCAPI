@@ -1,7 +1,7 @@
-using System;
-using VibecodeReg.Models;
+﻿using System;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Strategies;
+namespace BAOCODETOOL.Strategies;
 
 public static class StrategyFactory
 {

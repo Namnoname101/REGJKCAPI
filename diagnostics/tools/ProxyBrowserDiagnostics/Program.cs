@@ -1,6 +1,6 @@
-using OpenQA.Selenium;
-using VibecodeReg.Core;
-using VibecodeReg.Models;
+﻿using OpenQA.Selenium;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Models;
 
 var rawProxy = args.FirstOrDefault() ?? Environment.GetEnvironmentVariable("VIBECODE_TEST_PROXY");
 var testUrl = args.Skip(1).FirstOrDefault() ?? Environment.GetEnvironmentVariable("VIBECODE_PROXY_TEST_URL") ?? "https://ipinfo.io/ip";
@@ -64,3 +64,4 @@ finally
 
     driver?.Dispose();
 }
+

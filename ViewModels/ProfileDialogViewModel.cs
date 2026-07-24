@@ -1,14 +1,14 @@
-using CommunityToolkit.Mvvm.ComponentModel;
+﻿using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using System;
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Threading.Tasks;
-using VibecodeReg.Core;
-using VibecodeReg.Models;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.ViewModels;
+namespace BAOCODETOOL.ViewModels;
 
 public partial class ProfileDialogViewModel : ObservableObject
 {

@@ -1,10 +1,10 @@
-using OpenQA.Selenium;
+﻿using OpenQA.Selenium;
 using System;
 using System.Threading.Tasks;
-using VibecodeReg.Core;
-using VibecodeReg.Models;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Strategies;
+namespace BAOCODETOOL.Strategies;
 
 public sealed class GG88Strategy : ISiteAutomationStrategy
 {

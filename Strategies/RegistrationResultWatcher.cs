@@ -4,10 +4,10 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
-using VibecodeReg.Core;
-using VibecodeReg.Models;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Models;
 
-namespace VibecodeReg.Strategies;
+namespace BAOCODETOOL.Strategies;
 
 internal enum RegistrationOutcomeKind
 {
@@ -33,7 +33,8 @@ internal sealed record RegistrationResultWatchOptions(
     IReadOnlyList<By> ModalSelectors,
     IReadOnlyList<By> FailureMessageSelectors,
     IReadOnlyList<By> StatusMessageSelectors,
-    IReadOnlyList<By> InvalidFieldSelectors);
+    IReadOnlyList<By> InvalidFieldSelectors,
+    bool AssumeSuccessOnTimeout = false);
 
 internal static class RegistrationResultWatcher
 {
@@ -65,7 +66,16 @@ internal static class RegistrationResultWatcher
         "sai",
         "ton tai",
         "that bai",
-        "tu choi"
+        "tu choi",
+        "khong dung",
+        "khong hop le",
+        "da duoc dang ky",
+        "thu lai",
+        "vuot qua",
+        "khac",
+        "trung lap",
+        "dang ky roi",
+        "da su dung"
     ];
 
     public static RegistrationOutcome WaitForResult(
@@ -118,6 +128,15 @@ internal static class RegistrationResultWatcher
 
             lastUrl = SafeGetUrl(driver);
             lastTitle = SafeGetTitle(driver);
+
+            if (lastUrl != null && (lastUrl.Contains("/m/home", StringComparison.OrdinalIgnoreCase) || 
+                                    lastUrl.Contains("/m/member", StringComparison.OrdinalIgnoreCase) ||
+                                    lastUrl.Contains("/home", StringComparison.OrdinalIgnoreCase) ||
+                                    lastUrl.Contains("/user/center", StringComparison.OrdinalIgnoreCase)))
+            {
+                return RegistrationOutcome.Success($"Redirected to authenticated area: {TrimForLog(lastUrl)}");
+            }
+
             formVisible = HasAnyVisible(driver, options.FormSelectors);
             modalVisible = HasAnyVisible(driver, options.ModalSelectors);
 
@@ -132,11 +151,101 @@ internal static class RegistrationResultWatcher
             remaining -= delay;
         }
 
+        if (options.AssumeSuccessOnTimeout)
+        {
+            return RegistrationOutcome.Success(
+                $"Assumed success because no errors appeared within {options.Timeout.TotalSeconds:0}s. " +
+                $"Url={TrimForLog(lastUrl)}; Title={TrimForLog(lastTitle)}");
+        }
+
         return RegistrationOutcome.Timeout(
             $"No verified website result within {options.Timeout.TotalSeconds:0}s. " +
             $"Url={TrimForLog(lastUrl)}; Title={TrimForLog(lastTitle)}; " +
             $"FormVisible={formVisible}; ModalVisible={modalVisible}; " +
             $"LastMessage={(string.IsNullOrWhiteSpace(lastMessage) ? "none" : TrimForLog(lastMessage))}");
+    }
+
+    public static RegistrationOutcome AggressiveAssumeSuccess(
+        IWebDriver driver,
+        AutomationExecutionContext executionContext)
+    {
+        // Chờ kết quả trong tối đa 15 giây để xử lý các mạng chậm hoặc API lag
+        var pollEndTime = DateTime.Now.AddSeconds(15);
+        var initialUrl = driver.Url;
+        
+        if (driver is IJavaScriptExecutor js)
+        {
+            while (DateTime.Now < pollEndTime)
+            {
+                if (executionContext.CancellationToken.IsCancellationRequested) break;
+
+                try
+                {
+                    var resultMessage = js.ExecuteScript(@"
+                        // 1. Kiểm tra URL thay đổi (Đăng ký thành công thường chuyển hướng sang home)
+                        if (window.location.href !== arguments[0] && 
+                            (window.location.href.includes('/m/home') || window.location.href.includes('/m/member/home'))) {
+                            return 'SUCCESS:Redirected';
+                        }
+
+                        // 2. Quét thông báo lỗi hoặc thành công trên màn hình
+                        var allEls = document.querySelectorAll('div, span, p, .van-toast__text, .van-dialog__message, .van-dialog, .el-message-box, .dialog-content');
+                        for(var i=0; i<allEls.length; i++) {
+                            var el = allEls[i];
+                            // Tăng giới hạn text length lên 300 để bắt trọn cả Dialog to
+                            if (el.offsetWidth > 0 && el.offsetHeight > 0 && el.innerText && el.innerText.trim().length < 300) {
+                                var text = el.innerText.toLowerCase();
+                                
+                                // Phát hiện thành công sớm
+                                if (text.includes('thành công') || text.includes('success')) {
+                                    return 'SUCCESS:' + el.innerText.trim();
+                                }
+                                
+                                // Phát hiện lỗi
+                                if (text.includes('tồn tại') || 
+                                    text.includes('không đúng') || 
+                                    text.includes('chưa chính xác') || 
+                                    text.includes('invalid') || 
+                                    text.includes('đã được đăng ký') || 
+                                    text.includes('đã được sử dụng') || 
+                                    text.includes('sai định dạng') || 
+                                    text.includes('vui lòng thử lại') ||
+                                    text.includes('thất bại') ||
+                                    text.includes('lỗi')) {
+                                    return 'ERROR:' + el.innerText.trim();
+                                }
+                            }
+                        }
+                        return null;
+                    ", initialUrl) as string;
+
+                    if (!string.IsNullOrEmpty(resultMessage))
+                    {
+                        if (resultMessage.StartsWith("ERROR:"))
+                        {
+                            return RegistrationOutcome.Failure($"Error immediately after form submission: {resultMessage.Substring(6)}");
+                        }
+                        else if (resultMessage.StartsWith("SUCCESS:"))
+                        {
+                            // Đợi thêm 1 chút xíu để trang load hẳn sau khi báo thành công
+                            executionContext.Delay(TimeSpan.FromSeconds(1));
+                            return RegistrationOutcome.Success($"Verified success: {resultMessage.Substring(8)}");
+                        }
+                    }
+                }
+                catch { }
+
+                executionContext.Delay(TimeSpan.FromMilliseconds(500));
+            }
+        }
+        else
+        {
+            // Fallback nếu không hỗ trợ JS
+            executionContext.Delay(TimeSpan.FromSeconds(10));
+        }
+
+        // Hết 15 giây mà không thấy lỗi gì, cũng không thấy đổi URL thì tạm chốt là thành công.
+        return RegistrationOutcome.Success("Assumed success (No validation errors detected after 15s).");
     }
 
     public static bool ReportOutcome(

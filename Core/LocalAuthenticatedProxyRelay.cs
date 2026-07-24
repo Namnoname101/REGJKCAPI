@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Buffers;
 using System.Collections.Generic;
 using System.IO;
@@ -8,7 +8,7 @@ using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 internal sealed class LocalAuthenticatedProxyRelay : IDisposable
 {

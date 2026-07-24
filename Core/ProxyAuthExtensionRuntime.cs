@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Diagnostics;
 using System.Globalization;
 using System.IO;
@@ -6,11 +6,11 @@ using System.Text;
 using System.Text.Json;
 using System.Threading;
 
-namespace VibecodeReg.Core;
+namespace BAOCODETOOL.Core;
 
 internal static class ProxyAuthExtensionRuntime
 {
-    private const string ExtensionFolderName = "VibecodeRegProxyExtension";
+    private const string ExtensionFolderName = "BAOCODETOOLProxyExtension";
 
     public static string CreateOrUpdate(string profileFolderPath, ProxyConfiguration proxyConfiguration)
     {
@@ -71,8 +71,8 @@ internal static class ProxyAuthExtensionRuntime
         {
           "version": "1.0.0",
           "manifest_version": 3,
-          "name": "VibecodeReg Proxy",
-          "description": "Per-profile proxy injector for VibecodeReg browser sessions.",
+          "name": "BAOCODETOOL Proxy",
+          "description": "Per-profile proxy injector for BAOCODETOOL browser sessions.",
           "permissions": [
             "proxy",
             "storage",
@@ -86,7 +86,7 @@ internal static class ProxyAuthExtensionRuntime
             "service_worker": "background.js"
           },
           "action": {
-            "default_title": "VibecodeReg Proxy"
+            "default_title": "BAOCODETOOL Proxy"
           },
           "minimum_chrome_version": "120.0.0"
         }
