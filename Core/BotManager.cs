@@ -1,6 +1,7 @@
 using OpenQA.Selenium;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
@@ -44,11 +45,21 @@ public sealed class BotManager
         cancellationTokenSource?.Cancel();
     }
 
-    public async Task RunMassRegistrationAsync(IEnumerable<AccountModel> profiles, int maxThreads, Action? onSiteCompleted = null)
+    public async Task RunMassRegistrationAsync(
+        IEnumerable<AccountModel> profiles,
+        int maxThreads,
+        Action? onSiteCompleted = null,
+        CancellationToken cancellationToken = default,
+        SemaphoreSlim? browserStartupGate = null,
+        bool headless = false,
+        bool enableDirectHttpRegistration = true,
+        int maxConcurrentSitesPerAccount = 1,
+        IBrowserSessionPool? browserSessionPool = null,
+        IBrowserConcurrencyGovernor? browserConcurrencyGovernor = null)
     {
         ArgumentNullException.ThrowIfNull(profiles);
 
-        var cancellationTokenSource = BeginRun();
+        var cancellationTokenSource = BeginRun(cancellationToken);
         var executionContext = new AutomationExecutionContext(cancellationTokenSource.Token, _pauseEvent);
 
         try
@@ -63,23 +74,24 @@ public sealed class BotManager
         }
 
         maxThreads = Math.Max(1, maxThreads);
+        maxConcurrentSitesPerAccount = Math.Max(1, maxConcurrentSitesPerAccount);
 
         using var semaphore = new SemaphoreSlim(maxThreads);
         var tasks = new List<Task>();
         
         foreach (var account in activeAccounts)
         {
-            tasks.Add(RunAccountSitesConcurrentlyAsync(account, semaphore, executionContext, onSiteCompleted));
-            
-            try 
-            {
-                // Delay 4s between starting each account to stagger browser launches
-                await Task.Delay(TimeSpan.FromSeconds(4), executionContext.CancellationToken);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
-            }
+            tasks.Add(RunAccountSitesConcurrentlyAsync(
+                account,
+                semaphore,
+                Math.Min(maxThreads, maxConcurrentSitesPerAccount),
+                executionContext,
+                onSiteCompleted,
+                browserStartupGate,
+                headless,
+                enableDirectHttpRegistration,
+                browserSessionPool,
+                browserConcurrencyGovernor));
         }
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -93,40 +105,97 @@ public sealed class BotManager
 private async Task RunAccountSitesConcurrentlyAsync(
     AccountModel account,
     SemaphoreSlim semaphore,
+    int maxConcurrentSitesPerAccount,
     AutomationExecutionContext executionContext,
-    Action? onSiteCompleted)
+    Action? onSiteCompleted,
+    SemaphoreSlim? browserStartupGate,
+    bool headless,
+    bool enableDirectHttpRegistration,
+    IBrowserSessionPool? browserSessionPool,
+    IBrowserConcurrencyGovernor? browserConcurrencyGovernor)
 {
     var siteRuns = account.SiteRuns
         .Where(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone)
         .ToList();
 
-    foreach (var siteRun in siteRuns)
+    if (siteRuns.Count == 0)
     {
-        if (executionContext.CancellationToken.IsCancellationRequested) break;
-        await RunJobAsync(account, siteRun, semaphore, executionContext, onSiteCompleted);
+        return;
     }
+
+    using var accountSemaphore = new SemaphoreSlim(maxConcurrentSitesPerAccount);
+    var tasks = siteRuns
+        .Select(siteRun => RunJobAsync(
+            account,
+            siteRun,
+            semaphore,
+            accountSemaphore,
+            executionContext,
+            onSiteCompleted,
+            browserStartupGate,
+            headless,
+            enableDirectHttpRegistration,
+            browserSessionPool,
+            browserConcurrencyGovernor))
+        .ToArray();
+
+    await Task.WhenAll(tasks).ConfigureAwait(false);
 }
 
 private async Task RunJobAsync(
     AccountModel account,
     SiteRunModel siteRun,
     SemaphoreSlim semaphore,
+    SemaphoreSlim accountSemaphore,
     AutomationExecutionContext executionContext,
-    Action? onSiteCompleted)
+    Action? onSiteCompleted,
+    SemaphoreSlim? browserStartupGate,
+    bool headless,
+    bool enableDirectHttpRegistration,
+    IBrowserSessionPool? browserSessionPool,
+    IBrowserConcurrencyGovernor? browserConcurrencyGovernor)
 {
+    var accountSlotAcquired = false;
     var slotAcquired = false;
 
     try
     {
         executionContext.Checkpoint();
-        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Queued. Waiting for browser slot...");
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Queued. Waiting for site slot...");
 
+        // Acquire the per-account slot before the global slot. This prevents
+        // queued sites from consuming global slots while waiting for their
+        // own account's concurrency limit.
+        await accountSemaphore.WaitAsync(executionContext.CancellationToken).ConfigureAwait(false);
+        accountSlotAcquired = true;
+
+        if (enableDirectHttpRegistration
+            && DirectRegistrationWorkflow.IsSupported(siteRun.Site)
+            && await TryRunDirectHttpRegistrationAsync(
+                    account,
+                    siteRun,
+                    executionContext,
+                    onSiteCompleted)
+                .ConfigureAwait(false))
+        {
+            return;
+        }
+
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Waiting for browser slot...");
         await semaphore.WaitAsync(executionContext.CancellationToken).ConfigureAwait(false);
         slotAcquired = true;
 
         executionContext.Checkpoint();
         await Task.Run(
-                () => RunSingleSiteExecution(account, siteRun, executionContext, onSiteCompleted),
+                () => RunSingleSiteExecution(
+                    account,
+                    siteRun,
+                    executionContext,
+                    onSiteCompleted,
+                    browserStartupGate,
+                    headless,
+                    browserSessionPool,
+                    browserConcurrencyGovernor),
                 executionContext.CancellationToken)
             .ConfigureAwait(false);
     }
@@ -143,6 +212,156 @@ private async Task RunJobAsync(
         {
             semaphore.Release();
         }
+
+        if (accountSlotAcquired)
+        {
+            accountSemaphore.Release();
+        }
+    }
+}
+
+private static async Task<bool> TryRunDirectHttpRegistrationAsync(
+    AccountModel account,
+    SiteRunModel siteRun,
+    AutomationExecutionContext executionContext,
+    Action? onSiteCompleted)
+{
+    var metrics = new SitePerformanceMetrics();
+    var totalStopwatch = Stopwatch.StartNew();
+    var handled = false;
+
+    try
+    {
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            executionContext.Checkpoint();
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Running,
+                $"Executing direct HTTP registration (Attempt {attempt})...");
+
+            var registrationStopwatch = Stopwatch.StartNew();
+            var outcome = await DirectRegistrationWorkflow.TryRegisterAsync(
+                    account,
+                    siteRun.Site,
+                    executionContext.CancellationToken)
+                .ConfigureAwait(false);
+            registrationStopwatch.Stop();
+            metrics.RegistrationMs += registrationStopwatch.ElapsedMilliseconds;
+
+            if (outcome.Status == DirectRegistrationStatus.Success)
+            {
+                if (outcome.Session is null)
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        AccountStatus.Failed,
+                        "Direct HTTP registration succeeded but did not return a session token for bank setup.");
+                    handled = true;
+                    return true;
+                }
+
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Phase1_RegDone,
+                    "Direct HTTP registration completed. Starting direct bank setup...");
+
+                executionContext.Checkpoint();
+                var bankSetupStopwatch = Stopwatch.StartNew();
+                var bankOutcome = await DirectBankSetupWorkflow.TrySetupAsync(
+                        account,
+                        siteRun.Site,
+                        outcome.Session,
+                        executionContext.CancellationToken)
+                    .ConfigureAwait(false);
+                bankSetupStopwatch.Stop();
+                metrics.BankSetupMs += bankSetupStopwatch.ElapsedMilliseconds;
+
+                if (bankOutcome.Status != DirectBankSetupStatus.Success)
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        AccountStatus.Failed,
+                        $"Direct HTTP bank setup failed: {bankOutcome.Message}");
+                    handled = true;
+                    return true;
+                }
+
+                ResultWriter.AppendSuccess(account, siteRun.Site);
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Success,
+                    "Direct HTTP registration and bank setup completed. Saved to success.txt.");
+                handled = true;
+                return true;
+            }
+
+            if (outcome.Status == DirectRegistrationStatus.FallbackToBrowser
+                || outcome.Status == DirectRegistrationStatus.NotSupported)
+            {
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Running,
+                    $"{outcome.Message} Falling back to browser workflow...");
+                return false;
+            }
+
+            if (outcome.UsernameConflict && attempt < 2)
+            {
+                var newUsername = ShortUsernameGenerator.Next();
+                account.SpecificUsernames[siteRun.Site] = newUsername;
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Running,
+                    $"Direct HTTP username existed. Retrying with {newUsername}...");
+                continue;
+            }
+
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Failed,
+                $"Direct HTTP registration failed: {outcome.Message}");
+            handled = true;
+            return true;
+        }
+
+        AutomationUi.SetSiteStatus(
+            account,
+            siteRun,
+            AccountStatus.Failed,
+            "Direct HTTP registration failed after username retry.");
+        handled = true;
+        return true;
+    }
+    catch (OperationCanceledException)
+    {
+        throw;
+    }
+    finally
+    {
+        if (handled)
+        {
+            totalStopwatch.Stop();
+            metrics.TotalMs = totalStopwatch.ElapsedMilliseconds;
+            SitePerformanceMetricsWriter.Append(account, siteRun, metrics);
+
+            try
+            {
+                onSiteCompleted?.Invoke();
+            }
+            catch (Exception callbackException)
+            {
+                Debug.WriteLine($"Site completion callback failed: {callbackException}");
+            }
+        }
     }
 }
 
@@ -150,16 +369,73 @@ private static void RunSingleSiteExecution(
     AccountModel account,
     SiteRunModel siteRun,
     AutomationExecutionContext executionContext,
-    Action? onSiteCompleted)
+    Action? onSiteCompleted,
+    SemaphoreSlim? browserStartupGate,
+    bool headless,
+    IBrowserSessionPool? browserSessionPool,
+    IBrowserConcurrencyGovernor? browserConcurrencyGovernor)
 {
+    IBrowserSessionLease? pooledLease = null;
+    IBrowserConcurrencyLease? concurrencyLease = null;
+    IWebDriver? dedicatedDriver = null;
+    var metrics = new SitePerformanceMetrics();
+    var totalStopwatch = Stopwatch.StartNew();
+
     try
     {
         executionContext.Checkpoint();
-        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Launching browser profile...");
+        var capacityStopwatch = Stopwatch.StartNew();
+        if (browserConcurrencyGovernor is not null)
+        {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Running,
+                "Waiting for CPU/browser capacity...");
+            concurrencyLease = browserConcurrencyGovernor.Acquire(
+                executionContext.CancellationToken);
+        }
+        capacityStopwatch.Stop();
+        metrics.CapacityWaitMs = capacityStopwatch.ElapsedMilliseconds;
 
-        using IWebDriver driver = DriverFactory.CreateDriver(account, siteRun.Site);
+        IWebDriver driver;
+        var browserAcquireStopwatch = Stopwatch.StartNew();
 
-        RunSingleSiteInBrowser(driver, account, siteRun, executionContext);
+        if (browserSessionPool?.CanServe(account, headless) == true)
+        {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Running,
+                "Renting prewarmed browser...");
+
+            pooledLease = browserSessionPool.Rent(
+                siteRun.Site,
+                executionContext.CancellationToken);
+            driver = pooledLease.Driver;
+        }
+        else
+        {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Running,
+                "Launching dedicated browser profile...");
+
+            // The gate is released as soon as the driver is created. It must
+            // not cover the registration workflow.
+            dedicatedDriver = CreateDriverWithStartupGate(
+                account,
+                siteRun.Site,
+                headless,
+                browserStartupGate,
+                executionContext.CancellationToken);
+            driver = dedicatedDriver;
+        }
+        browserAcquireStopwatch.Stop();
+        metrics.BrowserAcquireMs = browserAcquireStopwatch.ElapsedMilliseconds;
+
+        RunSingleSiteInBrowser(driver, account, siteRun, executionContext, metrics);
     }
     catch (OperationCanceledException)
     {
@@ -171,7 +447,76 @@ private static void RunSingleSiteExecution(
     }
     finally
     {
-        onSiteCompleted?.Invoke();
+        var browserResetStopwatch = Stopwatch.StartNew();
+        try
+        {
+            var diagnosticDriver = pooledLease?.Driver ?? dedicatedDriver;
+            if (siteRun.Status == AccountStatus.Failed && diagnosticDriver is not null)
+            {
+                BrowserFailureArtifactWriter.TryCapture(diagnosticDriver, account, siteRun);
+            }
+
+            if (pooledLease is not null)
+            {
+                pooledLease.Dispose();
+            }
+            else
+            {
+                dedicatedDriver?.Dispose();
+            }
+        }
+        finally
+        {
+            browserResetStopwatch.Stop();
+            metrics.BrowserResetMs = browserResetStopwatch.ElapsedMilliseconds;
+            totalStopwatch.Stop();
+            metrics.TotalMs = totalStopwatch.ElapsedMilliseconds;
+            SitePerformanceMetricsWriter.Append(account, siteRun, metrics);
+            concurrencyLease?.Dispose();
+
+            // Persistence/telemetry callbacks are deliberately outside the
+            // browser result path. A transient disk/IO failure must not turn
+            // an otherwise successful site into an unhandled Task exception
+            // that poisons the whole account job.
+            try
+            {
+                onSiteCompleted?.Invoke();
+            }
+            catch (Exception callbackException)
+            {
+                Debug.WriteLine($"Site completion callback failed: {callbackException}");
+            }
+        }
+    }
+}
+
+private static IWebDriver CreateDriverWithStartupGate(
+    AccountModel account,
+    TargetSite site,
+    bool headless,
+    SemaphoreSlim? browserStartupGate,
+    CancellationToken cancellationToken)
+{
+    var startupSlotAcquired = false;
+
+    try
+    {
+        if (browserStartupGate is not null)
+        {
+            // Chrome startup is CPU/IO heavy. Gate only this creation phase so
+            // already-running browsers can execute in parallel.
+            browserStartupGate.Wait(cancellationToken);
+            startupSlotAcquired = true;
+        }
+
+        return DriverFactory.CreateDriver(account, site, headless);
+    }
+    finally
+    {
+        if (startupSlotAcquired)
+        {
+            browserStartupGate!.Release();
+        }
     }
 }
 
@@ -179,13 +524,15 @@ private static void RunSingleSiteInBrowser(
     IWebDriver driver,
     AccountModel account,
     SiteRunModel siteRun,
-    AutomationExecutionContext executionContext)
+    AutomationExecutionContext executionContext,
+    SitePerformanceMetrics metrics)
 {
     try
     {
         executionContext.Checkpoint();
         var strategy = StrategyFactory.Create(siteRun.Site);
 
+        var registrationStopwatch = Stopwatch.StartNew();
         bool registrationSucceeded = false;
         for (int attempt = 1; attempt <= 2; attempt++)
         {
@@ -203,8 +550,7 @@ private static void RunSingleSiteInBrowser(
                  !siteRun.LogMessage.Contains("phone", StringComparison.OrdinalIgnoreCase))
             {
                 // Thay đổi username riêng cho site này
-                var rng = new Random();
-                var newUsername = account.GetUsername(siteRun.Site) + rng.Next(10, 99).ToString();
+                var newUsername = ShortUsernameGenerator.Next();
                 account.SpecificUsernames[siteRun.Site] = newUsername;
                 
                 AutomationUi.SetSiteStatus(account, siteRun, logMessage: $"Username existed. Retrying with {newUsername}...");
@@ -216,6 +562,9 @@ private static void RunSingleSiteInBrowser(
             // Lỗi khác thì thoát luôn
             break;
         }
+
+        registrationStopwatch.Stop();
+        metrics.RegistrationMs = registrationStopwatch.ElapsedMilliseconds;
 
         if (!registrationSucceeded)
         {
@@ -229,10 +578,17 @@ private static void RunSingleSiteInBrowser(
 
         AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Phase1_RegDone, "Registration completed. Starting bank setup...");
         executionContext.Checkpoint();
+        var bankSetupStopwatch = Stopwatch.StartNew();
         var bankSetupSucceeded = strategy.ExecuteBankSetup(driver, account, siteRun, executionContext);
+        bankSetupStopwatch.Stop();
+        metrics.BankSetupMs = bankSetupStopwatch.ElapsedMilliseconds;
         if (!bankSetupSucceeded)
         {
-            AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Bank setup phase failed.");
+            if (siteRun.Status != AccountStatus.Failed)
+            {
+                AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Bank setup phase failed.");
+            }
+
             return;
         }
 
@@ -250,7 +606,7 @@ private static void RunSingleSiteInBrowser(
     }
 }
 
-    private CancellationTokenSource BeginRun()
+    private CancellationTokenSource BeginRun(CancellationToken cancellationToken)
     {
         lock (_runLock)
         {
@@ -259,7 +615,7 @@ private static void RunSingleSiteInBrowser(
                 throw new InvalidOperationException("Automation is already running.");
             }
 
-            _cts = new CancellationTokenSource();
+            _cts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             _pauseEvent.Set();
             return _cts;
         }

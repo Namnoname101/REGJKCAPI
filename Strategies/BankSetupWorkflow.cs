@@ -103,7 +103,8 @@ internal static class BankSetupWorkflow
         IWebDriver driver,
         AccountModel account,
         SiteRunModel siteRun,
-        AutomationExecutionContext executionContext)
+        AutomationExecutionContext executionContext,
+        string? directBankUrl = null)
     {
         ArgumentNullException.ThrowIfNull(driver);
         ArgumentNullException.ThrowIfNull(account);
@@ -145,12 +146,60 @@ internal static class BankSetupWorkflow
             }
             catch { }
 
-            NavigateToBankSetup(driver, executionContext);
+            var fastBindResult = TryFastBindThroughMemberStore(
+                driver,
+                account,
+                bankName,
+                bankAccount,
+                branch,
+                withdrawPassword,
+                executionContext);
+            if (fastBindResult == FastBankBindResult.Success)
+            {
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    logMessage: "Bank setup succeeded through authenticated API path.");
+                return true;
+            }
+
+            if (fastBindResult == FastBankBindResult.Rejected)
+            {
+                if (VerifyBankCardLinked(driver, bankAccount, bankName))
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        logMessage: "Bank was already linked; treating the idempotent API result as success.");
+                    return true;
+                }
+
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    logMessage: "Authenticated API path was rejected; continuing with the visual fallback.");
+            }
+            else if (fastBindResult == FastBankBindResult.Indeterminate)
+            {
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Failed,
+                    "Bank API submission could not be verified. Visual retry was skipped to prevent a duplicate bank binding.");
+                return false;
+            }
+
+            NavigateToBankSetup(driver, executionContext, directBankUrl);
 
             executionContext.Checkpoint();
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Opening bank selector...");
-            ClickAnyVisible(driver, AddBankSelectors, TimeSpan.FromSeconds(3), required: false);
-            ClickAnyVisible(driver, BankDropdownSelectors, TimeSpan.FromSeconds(5), required: true);
+            if (string.IsNullOrWhiteSpace(directBankUrl))
+            {
+                // Only search for the add-bank button when direct navigation
+                // was unavailable and the site returned to its home page.
+                ClickAnyVisible(driver, AddBankSelectors, TimeSpan.FromSeconds(3), required: false);
+            }
+            ClickAnyVisible(driver, BankDropdownSelectors, TimeSpan.FromSeconds(3), required: true);
 
             executionContext.Checkpoint();
             AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Selecting bank...");
@@ -229,9 +278,21 @@ internal static class BankSetupWorkflow
                 }
             }
 
-            // Nếu hết thời gian mà không bắt được toast nào (bị trôi nhanh quá), vẫn báo thành công
-            AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Bank setup submitted successfully (fallback).");
-            return true;
+            if (VerifyBankCardLinked(driver, bankAccount, bankName))
+            {
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    logMessage: "Bank setup submitted and verified through the bound-card list.");
+                return true;
+            }
+
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Failed,
+                "Bank setup returned no success message and the bound-card list did not confirm the account.");
+            return false;
         }
         catch (OperationCanceledException)
         {
@@ -260,6 +321,444 @@ internal static class BankSetupWorkflow
         catch (StaleElementReferenceException ex)
         {
             AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, $"Bank setup DOM changed while interacting: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static FastBankBindResult TryFastBindThroughMemberStore(
+        IWebDriver driver,
+        AccountModel account,
+        string bankName,
+        string bankAccount,
+        string branch,
+        string withdrawPassword,
+        AutomationExecutionContext executionContext)
+    {
+        if (driver is not IJavaScriptExecutor javaScript)
+        {
+            return FastBankBindResult.Unavailable;
+        }
+
+        try
+        {
+            var result = javaScript.ExecuteAsyncScript(
+                """
+                const targetBankName = arguments[0] || '';
+                const accountNumber = arguments[1] || '';
+                const branch = arguments[2] || '';
+                const paymentPassword = arguments[3] || '';
+                const suppliedPayee = arguments[4] || '';
+                const done = arguments[arguments.length - 1];
+                const operationState = {
+                    stage: 'preflight',
+                    updatedAt: Date.now()
+                };
+                window.__vibecodeRegBankBind = operationState;
+
+                const compact = value => String(value || '')
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]/g, '');
+
+                const isRequired = value =>
+                    value === true
+                    || ['Y', '1', 'TRUE'].includes(String(value || '').toUpperCase());
+
+                const wait = milliseconds =>
+                    new Promise(resolve => setTimeout(resolve, milliseconds));
+
+                const findStore = async () => {
+                    for (let attempt = 0; attempt < 15; attempt++) {
+                        const root = window.tcgmodulemc
+                            && window.tcgmodulemc.default
+                            && window.tcgmodulemc.default.memberCenterStore;
+                        if (root && root.seculist) return root;
+                        await wait(100);
+                    }
+                    return null;
+                };
+
+                const finish = (stage, result) => {
+                    operationState.stage = stage;
+                    operationState.result = result;
+                    operationState.updatedAt = Date.now();
+                    done(result);
+                };
+                const fallback = reason =>
+                    finish('fallback', `FALLBACK:${reason}`);
+
+                (async () => {
+                    const root = await findStore();
+                    const seculist = root && root.seculist;
+                    if (!seculist
+                        || typeof seculist.bindCard !== 'function'
+                        || typeof seculist.getBankLis !== 'function') {
+                        fallback('store-unavailable');
+                        return;
+                    }
+
+                    const memberInfo = root.mcCommon && root.mcCommon.memberInfo
+                        ? root.mcCommon.memberInfo
+                        : {};
+                    const requests = [];
+
+                    if (!Array.isArray(seculist.bankList) || seculist.bankList.length === 0) {
+                        requests.push(seculist.getBankLis());
+                    }
+
+                    if ((!memberInfo || typeof memberInfo !== 'object'
+                        || (!memberInfo.payee && !memberInfo.mobile))
+                        && root.mcCommon
+                        && typeof root.mcCommon.getMemberInfo === 'function') {
+                        requests.push(root.mcCommon.getMemberInfo());
+                    }
+
+                    if (requests.length > 0) {
+                        await Promise.all(requests);
+                    }
+
+                    const refreshedMemberInfo = root.mcCommon && root.mcCommon.memberInfo
+                        ? root.mcCommon.memberInfo
+                        : memberInfo;
+                    const bankTarget = compact(targetBankName);
+                    const bank = (seculist.bankList || []).find(item => {
+                        const candidate = compact(
+                            `${item.bankLocaleName || ''} ${item.bankEngName || ''} ` +
+                            `${item.bankChName || ''} ${item.bankCode || ''}`);
+                        return bankTarget
+                            && (candidate.includes(bankTarget) || bankTarget.includes(candidate));
+                    });
+
+                    if (!bank) {
+                        fallback('bank-not-found');
+                        return;
+                    }
+
+                    // The visual form is still required for banks that demand
+                    // extra user input (OTP, province/city, custom fields, etc.).
+                    if (isRequired(bank.isProvinceRequired)
+                        || isRequired(bank.isCityRequired)
+                        || isRequired(bank.isPlayerIdRequired)
+                        || isRequired(bank.isPlayerEmailRequired)
+                        || isRequired(bank.isPlayerPhoneRequired)
+                        || isRequired(bank.isCustomizeRequired)
+                        || (isRequired(bank.isBranchRequired) && !branch)) {
+                        fallback('bank-requires-visual-fields');
+                        return;
+                    }
+
+                    if (refreshedMemberInfo && refreshedMemberInfo.bindGA) {
+                        fallback('ga-confirmation-required');
+                        return;
+                    }
+
+                    let bankTemplate = null;
+                    if (typeof seculist.getBankTemplate === 'function') {
+                        try {
+                            bankTemplate = await seculist.getBankTemplate(bank.bankCode);
+                        } catch {
+                            fallback('bank-template-unavailable');
+                            return;
+                        }
+                    }
+
+                    let templatePlayerId = '';
+                    let templateLegalName = false;
+                    const templateSettings = bankTemplate
+                        && Array.isArray(bankTemplate.bankCardTemplateSettings)
+                        ? bankTemplate.bankCardTemplateSettings
+                        : [];
+                    for (const setting of templateSettings) {
+                        const cardItem = String(setting && setting.cardItem || '');
+                        if (cardItem === 'BANK_ACCOUNT_NUMBER') {
+                            templatePlayerId = accountNumber;
+                            continue;
+                        }
+
+                        if (cardItem === 'BANK_BRANCH') {
+                            continue;
+                        }
+
+                        if (cardItem === 'LEGAL_NAME') {
+                            if (setting && (setting.isLegalNameSeparate === true
+                                || String(setting.isLegalNameSeparate || '').toUpperCase() === 'Y')) {
+                                fallback('bank-template-needs-separate-legal-name');
+                                return;
+                            }
+
+                            templateLegalName = true;
+                            continue;
+                        }
+
+                        if (cardItem) {
+                            fallback('bank-template-needs-visual-fields');
+                            return;
+                        }
+                    }
+
+                    const language = window.localStorage.getItem('language') || 'CN';
+                    const displayBankName = bank.bankLocaleName
+                        || (language === 'CN' || language === 'TW'
+                            ? bank.bankChName
+                            : bank.bankEngName)
+                        || bank.bankEngName
+                        || bank.bankChName
+                        || targetBankName;
+
+                    const payload = {
+                        area: branch || '',
+                        paymentPassword,
+                        validatePaymentPassword: paymentPassword,
+                        verificationCode: '',
+                        mobileNum: refreshedMemberInfo && refreshedMemberInfo.mobile
+                            ? refreshedMemberInfo.mobile
+                            : '',
+                        cardType: 'B',
+                        countryDialingCode: refreshedMemberInfo
+                            && refreshedMemberInfo.countryDialingCode
+                            ? refreshedMemberInfo.countryDialingCode
+                            : '',
+                        playerId: templatePlayerId,
+                        customField: '',
+                        email: '',
+                        mobileNo: '',
+                        bankName: displayBankName,
+                        bankCode: bank.bankCode || '',
+                        payeeName: refreshedMemberInfo && refreshedMemberInfo.payee
+                            ? refreshedMemberInfo.payee
+                            : suppliedPayee,
+                        cardNumber: accountNumber,
+                        ...(templateLegalName ? { fullName: suppliedPayee } : {})
+                    };
+
+                    operationState.stage = 'submitting';
+                    operationState.updatedAt = Date.now();
+                    try {
+                        const response = await seculist.bindCard(payload);
+                        const status = response && Number(response.status);
+                        const responseData = response && response.data
+                            ? response.data
+                            : response;
+                        const explicitSuccess = Boolean(
+                            (response && response.success === true)
+                            || (responseData && responseData.success === true));
+
+                        if ((status >= 200 && status < 300) || explicitSuccess) {
+                            finish('success', `SUCCESS:${status || 200}`);
+                            return;
+                        }
+
+                        if (status > 0
+                            || (responseData && responseData.success === false)) {
+                            finish('rejected', `REJECTED:${status || 0}`);
+                            return;
+                        }
+
+                        finish('unknown', 'UNKNOWN:unclassified-response');
+                    } catch (error) {
+                        const status = error && error.response
+                            ? Number(error.response.status)
+                            : 0;
+                        if (status > 0) {
+                            finish('rejected', `REJECTED:${status}`);
+                            return;
+                        }
+
+                        finish('unknown', 'UNKNOWN:no-http-status');
+                    }
+                })().catch(() => {
+                    if (operationState.stage === 'submitting') {
+                        finish('unknown', 'UNKNOWN:store-error-after-submit');
+                    } else {
+                        fallback('store-error');
+                    }
+                });
+                """,
+                bankName,
+                bankAccount,
+                branch,
+                withdrawPassword,
+                account.FullName);
+
+            var resultText = result?.ToString() ?? string.Empty;
+            if (resultText.StartsWith("SUCCESS:", StringComparison.OrdinalIgnoreCase))
+            {
+                return FastBankBindResult.Success;
+            }
+
+            if (resultText.StartsWith("REJECTED:", StringComparison.OrdinalIgnoreCase))
+            {
+                return FastBankBindResult.Rejected;
+            }
+
+            if (resultText.StartsWith("UNKNOWN:", StringComparison.OrdinalIgnoreCase))
+            {
+                return VerifyBankCardLinked(driver, bankAccount, bankName)
+                    ? FastBankBindResult.Success
+                    : FastBankBindResult.Indeterminate;
+            }
+
+            return FastBankBindResult.Unavailable;
+        }
+        catch (WebDriverException)
+        {
+            return ResolveInterruptedFastBind(
+                driver,
+                bankAccount,
+                bankName,
+                executionContext);
+        }
+    }
+
+    private static FastBankBindResult ResolveInterruptedFastBind(
+        IWebDriver driver,
+        string bankAccount,
+        string bankName,
+        AutomationExecutionContext executionContext)
+    {
+        var stage = ReadFastBindStage(driver);
+        if (stage == "success")
+        {
+            return FastBankBindResult.Success;
+        }
+
+        if (stage == "rejected")
+        {
+            return FastBankBindResult.Rejected;
+        }
+
+        if (stage is "" or "preflight" or "fallback")
+        {
+            return FastBankBindResult.Unavailable;
+        }
+
+        var waitUntil = DateTime.UtcNow.AddSeconds(15);
+        while (stage == "submitting" && DateTime.UtcNow < waitUntil)
+        {
+            executionContext.Delay(TimeSpan.FromMilliseconds(250));
+            stage = ReadFastBindStage(driver);
+
+            if (stage == "success")
+            {
+                return FastBankBindResult.Success;
+            }
+
+            if (stage == "rejected")
+            {
+                return FastBankBindResult.Rejected;
+            }
+        }
+
+        if (VerifyBankCardLinked(driver, bankAccount, bankName))
+        {
+            return FastBankBindResult.Success;
+        }
+
+        return stage is "submitting" or "unknown"
+            ? FastBankBindResult.Indeterminate
+            : FastBankBindResult.Unavailable;
+    }
+
+    private static string ReadFastBindStage(IWebDriver driver)
+    {
+        if (driver is not IJavaScriptExecutor javaScript)
+        {
+            return string.Empty;
+        }
+
+        try
+        {
+            return javaScript.ExecuteScript(
+                    "return window.__vibecodeRegBankBind && window.__vibecodeRegBankBind.stage || '';")
+                ?.ToString()
+                ?.Trim()
+                .ToLowerInvariant()
+                ?? string.Empty;
+        }
+        catch (WebDriverException)
+        {
+            return string.Empty;
+        }
+    }
+
+    private static bool VerifyBankCardLinked(
+        IWebDriver driver,
+        string bankAccount,
+        string bankName)
+    {
+        if (driver is not IJavaScriptExecutor javaScript)
+        {
+            return false;
+        }
+
+        try
+        {
+            var result = javaScript.ExecuteAsyncScript(
+                """
+                const accountNumber = String(arguments[0] || '');
+                const targetBankName = String(arguments[1] || '')
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]/g, '');
+                const done = arguments[arguments.length - 1];
+                const root = window.tcgmodulemc
+                    && window.tcgmodulemc.default
+                    && window.tcgmodulemc.default.memberCenterStore;
+                const withdraw = root && root.withdraw;
+                if (!withdraw || typeof withdraw.getBankCard !== 'function') {
+                    done(false);
+                    return;
+                }
+
+                Promise.resolve(withdraw.getBankCard())
+                    .then(response => {
+                        const value = response && response.value !== undefined
+                            ? response.value
+                            : response && response.data && response.data.value !== undefined
+                                ? response.data.value
+                                : withdraw.bankCard;
+                        const collections = [
+                            value && value.bankCards,
+                            value && value.fullBankCardList,
+                            value && value.fullSortedCardList
+                        ].filter(Array.isArray);
+                        const cards = collections.flat();
+                        const expectedSuffix = accountNumber.length >= 4
+                            ? accountNumber.slice(-4)
+                            : accountNumber;
+                        const visibleCardMatch = cards.some(card => {
+                            const cardNumber = String(card && card.cardNumber || '');
+                            const digits = cardNumber.replace(/\D/g, '');
+                            const cardBankName = String(
+                                card && (card.bankName || card.bankEngName || card.bankCode) || '')
+                                .normalize('NFD')
+                                .replace(/[\u0300-\u036f]/g, '')
+                                .toLowerCase()
+                                .replace(/[^a-z0-9]/g, '');
+                            const bankMatches = !targetBankName
+                                || !cardBankName
+                                || cardBankName.includes(targetBankName)
+                                || targetBankName.includes(cardBankName);
+                            return bankMatches
+                                && digits.length >= expectedSuffix.length
+                                && digits.endsWith(expectedSuffix);
+                        });
+                        done(Boolean(
+                            accountNumber
+                            && (JSON.stringify(value || '').includes(accountNumber)
+                                || visibleCardMatch)));
+                    })
+                    .catch(() => done(false));
+                """,
+                bankAccount,
+                bankName);
+
+            return result is bool linked && linked;
+        }
+        catch (WebDriverException)
+        {
             return false;
         }
     }
@@ -358,12 +857,16 @@ internal static class BankSetupWorkflow
         catch { }
     }
 
-    private static void NavigateToBankSetup(IWebDriver driver, AutomationExecutionContext executionContext)
+    private static void NavigateToBankSetup(
+        IWebDriver driver,
+        AutomationExecutionContext executionContext,
+        string? directBankUrl)
     {
         try
         {
             // Đập popup nhanh TRƯỚC KHI navigate
-            if (driver is IJavaScriptExecutor js)
+            if (string.IsNullOrWhiteSpace(directBankUrl)
+                && driver is IJavaScriptExecutor js)
             {
                 js.ExecuteScript(@"
                     document.querySelectorAll('.van-overlay, .modal-backdrop, .overlay, .van-dialog, .toast_bg, .registerModal, .dialog-tips').forEach(e => e.remove());
@@ -379,37 +882,131 @@ internal static class BankSetupWorkflow
                 ");
             }
 
-            var currentUrl = driver.Url;
-            var uri = new Uri(currentUrl);
-            
-            // Xây dựng link nhảy thẳng vào form Thêm Ngân Hàng (Add Bank)
-            var query = string.IsNullOrEmpty(uri.Query) ? "?type=B" : uri.Query + "&type=B";
-            var addBankUrl = $"{uri.Scheme}://{uri.Host}/m/securityCenter/addBankCard{query}";
-            
-            // Điều hướng bằng Javascript để tránh lỗi treo của Selenium trên các trang SPA (Angular/Vue)
-            if (driver is IJavaScriptExecutor executor)
+            var addBankUrl = directBankUrl;
+            if (string.IsNullOrWhiteSpace(addBankUrl))
             {
-                executor.ExecuteScript($"window.location.href = '{addBankUrl}';");
+                var currentUrl = driver.Url;
+                var uri = new Uri(currentUrl);
+
+                // Xây dựng link nhảy thẳng vào form Thêm Ngân Hàng (Add Bank)
+                var query = string.IsNullOrEmpty(uri.Query) ? "?type=B" : uri.Query + "&type=B";
+                addBankUrl = $"{uri.Scheme}://{uri.Host}/m/securityCenter/addBankCard{query}";
             }
-            else
+
+            // The member area is a React single-page app. A full document
+            // reload repeats dozens of unrelated startup API calls and can add
+            // 15-20 seconds. Prefer an authenticated same-origin SPA route and
+            // retain a hard-navigation fallback for shell/version changes.
+            var spaNavigationStarted = TryNavigateWithinSpa(driver, addBankUrl);
+            if (spaNavigationStarted
+                && WaitForBankDropdown(driver, TimeSpan.FromSeconds(22)))
             {
-                driver.Navigate().GoToUrl(addBankUrl);
+                return;
             }
-            
-            // THAY VÌ chờ cứng 2s — chờ đến khi input form xuất hiện (tối đa 8s)
-            // Nếu form load nhanh thì thoát ngay, không lãng phí thời gian
-            try
+
+            NavigateWithFullReload(driver, addBankUrl);
+            if (!WaitForBankDropdown(driver, TimeSpan.FromSeconds(30)))
             {
-                var smartWait = new OpenQA.Selenium.Support.UI.WebDriverWait(driver, TimeSpan.FromSeconds(8));
-                smartWait.Until(d =>
-                {
-                    var inputs = d.FindElements(By.CssSelector("input.input-base, input[type='password'], input[type='text']"));
-                    return inputs.Count >= 2;
-                });
+                throw new WebDriverTimeoutException(
+                    "Bank setup route did not expose the bank selector after SPA and full-navigation attempts.");
             }
-            catch { /* nếu timeout thì tiếp tục, trang vẫn có thể dùng được */ }
         }
-        catch { }
+        catch (WebDriverTimeoutException)
+        {
+            throw;
+        }
+        catch
+        {
+            // Preserve the existing behavior for unexpected navigation
+            // failures. The required dropdown wait in Execute will report a
+            // precise interaction timeout.
+        }
+    }
+
+    private enum FastBankBindResult
+    {
+        Unavailable,
+        Success,
+        Rejected,
+        Indeterminate
+    }
+
+    private static bool TryNavigateWithinSpa(IWebDriver driver, string addBankUrl)
+    {
+        if (driver is not IJavaScriptExecutor javaScript)
+        {
+            return false;
+        }
+
+        try
+        {
+            var result = javaScript.ExecuteScript(
+                """
+                try {
+                    const target = new URL(arguments[0], window.location.href);
+                    const authenticated =
+                        Boolean(window.sessionStorage.getItem('MC_SESSION_INFO'))
+                        || Boolean(window.sessionStorage.getItem('sessionInfo'));
+
+                    if (target.origin !== window.location.origin
+                        || !window.location.pathname.startsWith('/m/')
+                        || !authenticated
+                        || typeof window.PopStateEvent !== 'function') {
+                        return false;
+                    }
+
+                    try { window.stop(); } catch {}
+                    window.history.pushState(
+                        {},
+                        '',
+                        target.pathname + target.search + target.hash);
+                    window.dispatchEvent(
+                        new PopStateEvent('popstate', { state: window.history.state }));
+                    return true;
+                } catch {
+                    return false;
+                }
+                """,
+                addBankUrl);
+
+            return result is bool started && started;
+        }
+        catch (WebDriverException)
+        {
+            return false;
+        }
+    }
+
+    private static void NavigateWithFullReload(IWebDriver driver, string addBankUrl)
+    {
+        if (driver is IJavaScriptExecutor javaScript)
+        {
+            javaScript.ExecuteAsyncScript(
+                """
+                const url = arguments[0];
+                const done = arguments[arguments.length - 1];
+                setTimeout(() => window.location.replace(url), 0);
+                done(true);
+                """,
+                addBankUrl);
+            return;
+        }
+
+        driver.Navigate().GoToUrl(addBankUrl);
+    }
+
+    private static bool WaitForBankDropdown(IWebDriver driver, TimeSpan timeout)
+    {
+        try
+        {
+            var wait = CreateWait(driver, timeout);
+            return wait.Until(webDriver =>
+                FindVisibleElements(webDriver, BankDropdownSelectors).Any());
+        }
+        catch (WebDriverTimeoutException)
+        {
+            return false;
+        }
     }
 
     private static void FillBankAccountAndBranch(
@@ -472,13 +1069,18 @@ internal static class BankSetupWorkflow
 
     private static void ClickBankName(IWebDriver driver, string bankName, TimeSpan timeout)
     {
-        var normalizedBankName = NormalizeForMatch(bankName);
+        if (TryClickBankNameWithJavaScript(driver, bankName))
+        {
+            return;
+        }
+
+        var normalizedBankName = CompactForMatch(bankName);
         var bankItem = WaitForMatchingText(
             driver,
             BankListItemSelectors,
             text =>
             {
-                var normalizedText = NormalizeForMatch(text);
+                var normalizedText = CompactForMatch(text);
                 return !string.IsNullOrWhiteSpace(normalizedText)
                     && (normalizedText.Contains(normalizedBankName, StringComparison.OrdinalIgnoreCase)
                         || normalizedBankName.Contains(normalizedText, StringComparison.OrdinalIgnoreCase));
@@ -486,6 +1088,48 @@ internal static class BankSetupWorkflow
             timeout);
 
         bankItem.ClickLikeHuman(driver);
+    }
+
+    private static bool TryClickBankNameWithJavaScript(
+        IWebDriver driver,
+        string bankName)
+    {
+        if (driver is not IJavaScriptExecutor javaScript)
+        {
+            return false;
+        }
+
+        try
+        {
+            var result = javaScript.ExecuteScript(
+                """
+                const compact = (value) => (value || '')
+                    .normalize('NFD')
+                    .replace(/[\u0300-\u036f]/g, '')
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]/g, '');
+                const target = compact(arguments[0]);
+                if (!target) return false;
+
+                for (const element of document.querySelectorAll('.popUps-list-item')) {
+                    if (!element.offsetWidth || !element.offsetHeight) continue;
+                    const text = compact(element.innerText || element.textContent);
+                    if (text && (text.includes(target) || target.includes(text))) {
+                        element.click();
+                        return true;
+                    }
+                }
+
+                return false;
+                """,
+                bankName);
+
+            return result is bool clicked && clicked;
+        }
+        catch (WebDriverException)
+        {
+            return false;
+        }
     }
 
     private static void ClickSubmitButton(IWebDriver driver, TimeSpan timeout)
@@ -718,5 +1362,12 @@ internal static class BankSetupWorkflow
         }
 
         return builder.ToString().Normalize(NormalizationForm.FormC).ToLowerInvariant().Trim();
+    }
+
+    private static string CompactForMatch(string? value)
+    {
+        return string.Concat(
+            NormalizeForMatch(value)
+                .Where(char.IsLetterOrDigit));
     }
 }

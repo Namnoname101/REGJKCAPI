@@ -1,5 +1,6 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
@@ -51,11 +52,35 @@ public static class ProfileStore
             }).ToList();
 
             var json = JsonSerializer.Serialize(data, JsonOptions);
-            File.WriteAllText(SaveFilePath, json);
+            // Write beside the destination and replace it in one move. A
+            // process termination or disk hiccup must not leave a truncated
+            // profiles_data.json that prevents the next startup from loading
+            // every account.
+            var temporaryPath = SaveFilePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try
+            {
+                File.WriteAllText(temporaryPath, json);
+                File.Move(temporaryPath, SaveFilePath, overwrite: true);
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(temporaryPath))
+                    {
+                        File.Delete(temporaryPath);
+                    }
+                }
+                catch
+                {
+                }
+            }
         }
-        catch
+        catch (Exception exception)
         {
-            // Ignore save errors to prevent crashing
+            // Persistence must not crash an active registration, but retain a
+            // breadcrumb for operators diagnosing a full/locked disk.
+            Debug.WriteLine($"Could not save profiles: {exception}");
         }
     }
 

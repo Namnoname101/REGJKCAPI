@@ -140,10 +140,10 @@ internal static class RegistrationResultWatcher
             formVisible = HasAnyVisible(driver, options.FormSelectors);
             modalVisible = HasAnyVisible(driver, options.ModalSelectors);
 
-            if (UrlChanged(options.PreSubmitUrl, lastUrl) && !formVisible && !modalVisible)
+            if (UrlChanged(options.PreSubmitUrl, lastUrl ?? string.Empty) && !formVisible && !modalVisible)
             {
                 return RegistrationOutcome.Success(
-                    $"URL changed and registration form/modal disappeared. Url={TrimForLog(lastUrl)}");
+                    $"URL changed and registration form/modal disappeared. Url={TrimForLog(lastUrl ?? string.Empty)}");
             }
 
             var delay = remaining < PollInterval ? remaining : PollInterval;
@@ -155,12 +155,12 @@ internal static class RegistrationResultWatcher
         {
             return RegistrationOutcome.Success(
                 $"Assumed success because no errors appeared within {options.Timeout.TotalSeconds:0}s. " +
-                $"Url={TrimForLog(lastUrl)}; Title={TrimForLog(lastTitle)}");
+                $"Url={TrimForLog(lastUrl ?? string.Empty)}; Title={TrimForLog(lastTitle ?? string.Empty)}");
         }
 
         return RegistrationOutcome.Timeout(
             $"No verified website result within {options.Timeout.TotalSeconds:0}s. " +
-            $"Url={TrimForLog(lastUrl)}; Title={TrimForLog(lastTitle)}; " +
+            $"Url={TrimForLog(lastUrl ?? string.Empty)}; Title={TrimForLog(lastTitle ?? string.Empty)}; " +
             $"FormVisible={formVisible}; ModalVisible={modalVisible}; " +
             $"LastMessage={(string.IsNullOrWhiteSpace(lastMessage) ? "none" : TrimForLog(lastMessage))}");
     }
@@ -169,7 +169,8 @@ internal static class RegistrationResultWatcher
         IWebDriver driver,
         AutomationExecutionContext executionContext)
     {
-        // Chờ kết quả trong tối đa 15 giây để xử lý các mạng chậm hoặc API lag
+        // Keep the outer timeout long enough for slow APIs, but exit as soon
+        // as the site has created an authenticated session.
         var pollEndTime = DateTime.Now.AddSeconds(15);
         var initialUrl = driver.Url;
         
@@ -178,6 +179,11 @@ internal static class RegistrationResultWatcher
             while (DateTime.Now < pollEndTime)
             {
                 if (executionContext.CancellationToken.IsCancellationRequested) break;
+
+                if (TryGetAuthenticatedRedirect(driver, initialUrl, out var redirectMessage))
+                {
+                    return RegistrationOutcome.Success(redirectMessage);
+                }
 
                 try
                 {
@@ -189,7 +195,10 @@ internal static class RegistrationResultWatcher
                         }
 
                         // 2. Quét thông báo lỗi hoặc thành công trên màn hình
-                        var allEls = document.querySelectorAll('div, span, p, .van-toast__text, .van-dialog__message, .van-dialog, .el-message-box, .dialog-content');
+                        var allEls = document.querySelectorAll(
+                            '.van-toast__text, .van-dialog__message, .van-dialog, ' +
+                            '.el-message-box, .dialog-content, [role=""alert""], [role=""status""], ' +
+                            '.toast, .toast-message, .modal-body');
                         for(var i=0; i<allEls.length; i++) {
                             var el = allEls[i];
                             // Tăng giới hạn text length lên 300 để bắt trọn cả Dialog to
@@ -232,10 +241,15 @@ internal static class RegistrationResultWatcher
                             return RegistrationOutcome.Success($"Verified success: {resultMessage.Substring(8)}");
                         }
                     }
+
+                    if (TryGetAuthenticatedSession(js, out var sessionMessage))
+                    {
+                        return RegistrationOutcome.Success(sessionMessage);
+                    }
                 }
                 catch { }
 
-                executionContext.Delay(TimeSpan.FromMilliseconds(500));
+                executionContext.Delay(TimeSpan.FromMilliseconds(250));
             }
         }
         else
@@ -244,8 +258,91 @@ internal static class RegistrationResultWatcher
             executionContext.Delay(TimeSpan.FromSeconds(10));
         }
 
-        // Hết 15 giây mà không thấy lỗi gì, cũng không thấy đổi URL thì tạm chốt là thành công.
-        return RegistrationOutcome.Success("Assumed success (No validation errors detected after 15s).");
+        // A slow response is only safe to treat as success when the site has
+        // already established an authenticated session. Without this check a
+        // stalled registration page could fall through to bank binding and
+        // submit data against the wrong or unauthenticated state.
+        if (driver is IJavaScriptExecutor sessionScript
+            && TryGetAuthenticatedSession(sessionScript, out var lateSessionMessage))
+        {
+            return RegistrationOutcome.Success(lateSessionMessage);
+        }
+
+        return RegistrationOutcome.Timeout(
+            "No verified success or authenticated session after the 15-second result window.");
+    }
+
+    private static bool TryGetAuthenticatedRedirect(
+        IWebDriver driver,
+        string initialUrl,
+        out string message)
+    {
+        message = string.Empty;
+
+        try
+        {
+            var currentUrl = SafeGetUrl(driver);
+            if (UrlChanged(initialUrl, currentUrl) && LooksLikeAuthenticatedUrl(currentUrl))
+            {
+                message = $"Redirected to authenticated area: {TrimForLog(currentUrl)}";
+                return true;
+            }
+        }
+        catch (WebDriverException)
+        {
+        }
+
+        return false;
+    }
+
+    private static bool TryGetAuthenticatedSession(
+        IJavaScriptExecutor javaScript,
+        out string message)
+    {
+        message = string.Empty;
+
+        try
+        {
+            var sessionState = javaScript.ExecuteScript(
+                """
+                const path = String(window.location.pathname || '').toLowerCase();
+                const keys = [
+                    ...Object.keys(window.localStorage || {}),
+                    ...Object.keys(window.sessionStorage || {})
+                ];
+                const authenticatedPath =
+                    path.includes('/home')
+                    || path.includes('/member')
+                    || path.includes('/user/center');
+                const authenticatedStorage = keys.some(key =>
+                    /^(mc_session_info|sessioninfo|token|auth)/i.test(key));
+                return {
+                    authenticatedPath,
+                    authenticatedStorage,
+                    path
+                };
+                """);
+
+            if (sessionState is IReadOnlyDictionary<string, object> state)
+            {
+                if (IsTruthy(state, "authenticatedPath"))
+                {
+                    message = "Authenticated path detected after registration submit.";
+                    return true;
+                }
+
+                if (IsTruthy(state, "authenticatedStorage"))
+                {
+                    message = "Authenticated browser storage detected after registration submit.";
+                    return true;
+                }
+            }
+        }
+        catch (WebDriverException)
+        {
+        }
+
+        return false;
     }
 
     public static bool ReportOutcome(
@@ -392,6 +489,23 @@ internal static class RegistrationResultWatcher
     {
         var normalized = NormalizeForKeywordMatch(message);
         return FailureKeywords.Any(keyword => normalized.Contains(keyword, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool LooksLikeAuthenticatedUrl(string url) =>
+        !string.IsNullOrWhiteSpace(url)
+        && (url.Contains("/m/home", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("/m/member", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("/home", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("/member", StringComparison.OrdinalIgnoreCase)
+            || url.Contains("/user/center", StringComparison.OrdinalIgnoreCase));
+
+    private static bool IsTruthy(
+        IReadOnlyDictionary<string, object> values,
+        string key)
+    {
+        return values.TryGetValue(key, out var value)
+               && value is bool boolean
+               && boolean;
     }
 
     private static string NormalizeForKeywordMatch(string value)

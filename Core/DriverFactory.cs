@@ -27,7 +27,10 @@ public static class DriverFactory
         return CreateDriver(account, siteToOpen);
     }
 
-    public static IWebDriver CreateDriver(AccountModel account, TargetSite? site)
+    public static IWebDriver CreateDriver(
+        AccountModel account,
+        TargetSite? site,
+        bool headless = false)
     {
         ArgumentNullException.ThrowIfNull(account);
 
@@ -35,14 +38,33 @@ public static class DriverFactory
             ? account.GetProfileFolderPath(site.Value)
             : account.ProfileFolderPath;
 
+        return CreateDriver(
+            profileFolderPath,
+            account.UserAgent,
+            account.Proxy,
+            headless);
+    }
+
+    public static IWebDriver CreateDriver(
+        string profileFolderPath,
+        string? userAgent,
+        string? proxy,
+        bool headless = false)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileFolderPath);
         Directory.CreateDirectory(profileFolderPath);
 
-        if (!ProxyConfigurationParser.TryParse(account.Proxy, out var proxyConfiguration, out var proxyError))
+        if (!ProxyConfigurationParser.TryParse(proxy, out var proxyConfiguration, out var proxyError))
         {
             throw new FormatException(proxyError ?? "Proxy configuration is invalid.");
         }
 
-        var options = CreateChromeOptions(profileFolderPath, account.UserAgent, proxyConfiguration, out var extensionDir);
+        var options = CreateChromeOptions(
+            profileFolderPath,
+            userAgent,
+            proxyConfiguration,
+            headless,
+            out var extensionDir);
         var service = ChromeDriverService.CreateDefaultService();
         service.HideCommandPromptWindow = true;
         service.SuppressInitialDiagnosticInformation = true;
@@ -80,7 +102,12 @@ public static class DriverFactory
         {
             // Tối ưu hóa Timeout
             driver.Manage().Timeouts().PageLoad = TimeSpan.FromSeconds(30);
-            driver.Manage().Timeouts().AsynchronousJavaScript = TimeSpan.FromSeconds(15);
+            // The authenticated bank API normally completes in under two
+            // seconds, but a saturated low-end CPU can delay its encrypted
+            // promise beyond 15 seconds. A longer script timeout lets the
+            // request return a definitive result instead of risking a duplicate
+            // visual retry after the server has already accepted it.
+            driver.Manage().Timeouts().AsynchronousJavaScript = TimeSpan.FromSeconds(30);
             driver.Manage().Timeouts().ImplicitWait = TimeSpan.Zero; // Không dùng implicit wait dài theo lời khuyên của ChatGPT
 
             // Chặn tải các tài nguyên nặng bằng CDP để cực kỳ nhẹ và chống đơ
@@ -120,19 +147,27 @@ public static class DriverFactory
         string profileFolderPath,
         string? userAgent,
         ProxyConfiguration? proxyConfiguration,
+        bool headless,
         out string? extensionDir)
     {
         extensionDir = null;
 
         var options = new ChromeOptions
         {
-            PageLoadStrategy = PageLoadStrategy.Eager,
+            // Registration strategies already wait for their own form/toast
+            // selectors. Do not make every subsequent Selenium command wait
+            // for unrelated home-page resources to finish loading.
+            PageLoadStrategy = PageLoadStrategy.None,
             UnhandledPromptBehavior = UnhandledPromptBehavior.Accept
         };
         
         // Tắt chế độ tàng hình theo yêu cầu của user, hiện cửa sổ nhỏ
-        // options.AddArgument("--headless=new");
         options.AddArgument("--window-size=800,600");
+
+        if (headless)
+        {
+            options.AddArgument("--headless=new");
+        }
         
         // --- CÁC TỐI ƯU HIỆU NĂNG VÀ CHỐNG ĐƠ TỪ CHATGPT ---
         

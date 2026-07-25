@@ -47,7 +47,7 @@ public sealed class JIN88Strategy : IRegistrationStrategy
                 try {{
                     // Xóa popup ngáng đường
                     document.querySelectorAll('.van-overlay, .modal-backdrop, .overlay').forEach(e => e.remove());
-                    document.querySelectorAll('button, div, span, a').forEach(el => {{
+                    document.querySelectorAll('button, [role=""button""]').forEach(el => {{
                         if (el.innerText && (el.innerText.trim() === 'Huỷ' || el.innerText.trim() === 'Cancel')) {{
                             el.click();
                         }}
@@ -62,10 +62,10 @@ public sealed class JIN88Strategy : IRegistrationStrategy
                         }}
                     }}
                     
-                    setVal(""input[ng-model='formData.member']"", '{account.GetUsername(siteRun.Site)}');
-                    setVal(""input[ng-model='formData.password']"", '{account.GetPassword(siteRun.Site)}');
-                    setVal(""input[ng-model='formData.name']"", '{account.FullName}');
-                    setVal(""input[ng-model='formData.phone']"", '{PhoneNumberFormatter.FormatTenDigitWithLeadingZero(account.PhoneNumber)}');
+                    setVal(""input[ng-model='formData.member']"", {JavaScriptValueEncoder.StringLiteral(account.GetUsername(siteRun.Site))});
+                    setVal(""input[ng-model='formData.password']"", {JavaScriptValueEncoder.StringLiteral(account.GetPassword(siteRun.Site))});
+                    setVal(""input[ng-model='formData.name']"", {JavaScriptValueEncoder.StringLiteral(account.FullName)});
+                    setVal(""input[ng-model='formData.phone']"", {JavaScriptValueEncoder.StringLiteral(PhoneNumberFormatter.FormatTenDigitWithLeadingZero(account.PhoneNumber))});
                 }} catch (e) {{ }}
             ";
             

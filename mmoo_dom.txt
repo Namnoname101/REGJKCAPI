@@ -11,3 +11,4 @@ btn: {'type': 'submit', 'ng-class': '$ctrl.styles.submit', 'ng-disabled': '$ctrl
 btn: {'type': 'reset', 'ng-class': '$ctrl.styles.reset', 'ng-disabled': '$ctrl.registerPending', 'class': ['btn', 'btn-default', '_1zNHYKenEo3OwmY_0Ztyrf']} Đặt lại
 btn: {'type': 'button', 'ng-class': '$ctrl.styles.freePlay', 'ng-disabled': '$ctrl.registerPending', 'class': ['btn', 'btn-default', 'C2eOddeuy8qzvJErwDYO8'], 'ui-sref': 'trial', 'href': '/Trial'} Đăng ký trải nghiệm
 btn: {'ng-class': '$ctrl.styles.reg', 'ng-click': '$ctrl.openRegisterModal()', 'type': 'button', 'translate': 'Shared_Register', 'class': ['ng-scope', 'ppUNnOlkVUpue-NNt6vxo']} ĐĂNG KÝ
+ 
