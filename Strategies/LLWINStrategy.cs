@@ -1,6 +1,4 @@
 ﻿using OpenQA.Selenium;
-using System;
-using System.Threading.Tasks;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
 
@@ -8,7 +6,7 @@ namespace BAOCODETOOL.Strategies;
 
 public sealed class LLWINStrategy : ISiteAutomationStrategy
 {
-    private const string TargetUrl = "https://llwin.app/?id=924999213&fixed.iswebclip=2";
+    private const string TargetUrl = "https://llwin.app/home/register?id=924999213";
 
     public bool ExecuteRegistration(
         IWebDriver driver,
@@ -16,13 +14,13 @@ public sealed class LLWINStrategy : ISiteAutomationStrategy
         SiteRunModel siteRun,
         AutomationExecutionContext executionContext)
     {
-        executionContext.Checkpoint();
-        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Opening registration page...");
-        driver.Navigate().GoToUrl(TargetUrl);
-
-        // TODO: Fill LLWIN registration fields after the target HTML DOM is available.
-        executionContext.Delay(TimeSpan.FromSeconds(2));
-        return true;
+        return LobbyMobileWorkflow.ExecuteRegistration(
+            driver,
+            account,
+            siteRun,
+            executionContext,
+            TargetUrl,
+            PhoneNumberFormatter.FormatNineDigitWithoutLeadingZero(account.PhoneNumber));
     }
 
     public bool ExecuteBankSetup(
@@ -31,11 +29,10 @@ public sealed class LLWINStrategy : ISiteAutomationStrategy
         SiteRunModel siteRun,
         AutomationExecutionContext executionContext)
     {
-        executionContext.Checkpoint();
-        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Preparing bank setup...");
-
-        // TODO: Fill LLWIN bank setup fields after the target HTML DOM is available.
-        executionContext.Delay(TimeSpan.FromSeconds(2));
-        return true;
+        return LobbyMobileWorkflow.ExecuteBankSetup(
+            driver,
+            account,
+            siteRun,
+            executionContext);
     }
 }

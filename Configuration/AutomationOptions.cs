@@ -29,17 +29,17 @@ public sealed class AutomationOptions
     public int QueueCapacity { get; set; } = 100;
 
     /// <summary>
-    /// Pre-launches reusable direct-connection Chrome sessions when the host
-    /// starts. Requests with a proxy or custom user-agent use dedicated drivers.
+    /// Pre-launches reusable direct-connection Chrome sessions for browser
+    /// fallback workflows. Keep disabled for API-first operation.
     /// </summary>
-    public bool EnablePrewarmedBrowserPool { get; set; } = true;
+    public bool EnablePrewarmedBrowserPool { get; set; }
 
     /// <summary>
     /// Total number of reusable direct-connection Chrome sessions.
     /// This also caps the number of direct registrations executing in browsers
     /// from the pool at one time.
     /// </summary>
-    public int PrewarmedBrowserPoolSize { get; set; } = 2;
+    public int PrewarmedBrowserPoolSize { get; set; }
 
     /// <summary>
     /// Recreates a pooled Chrome after this many leases to contain memory growth
@@ -84,14 +84,20 @@ public sealed class AutomationOptions
     public bool Headless { get; set; }
 
     /// <summary>
-    /// Temporary test switch: allows Telegram requests to omit proxy data and
-    /// lets Chrome connect directly.
+    /// Legacy switch kept for standalone diagnostics. Telegram registration
+    /// flows ignore it and always require a proxy.
     /// </summary>
-    public bool AllowDirectConnectionForTesting { get; set; } = true;
+    public bool AllowDirectConnectionForTesting { get; set; }
 
     /// <summary>
     /// Uses the site's encrypted HTTP registration API directly for supported
-    /// sites. Browser automation remains the fallback path.
+    /// sites. Browser fallback is separately opt-in and disabled by default.
     /// </summary>
     public bool EnableDirectHttpRegistration { get; set; } = true;
+
+    /// <summary>
+    /// Allows the legacy Selenium path after a direct API attempt cannot
+    /// complete. Keep disabled for high-throughput API-only operation.
+    /// </summary>
+    public bool EnableBrowserFallback { get; set; }
 }

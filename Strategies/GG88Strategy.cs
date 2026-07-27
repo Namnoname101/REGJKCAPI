@@ -1,6 +1,4 @@
 ﻿using OpenQA.Selenium;
-using System;
-using System.Threading.Tasks;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
 
@@ -8,7 +6,7 @@ namespace BAOCODETOOL.Strategies;
 
 public sealed class GG88Strategy : ISiteAutomationStrategy
 {
-    private const string TargetUrl = "https://www.gg88v.com/?id=456510325&fixed.iswebclip=2";
+    private const string TargetUrl = "https://www.gg88v.com/home/register?id=456510325";
 
     public bool ExecuteRegistration(
         IWebDriver driver,
@@ -16,13 +14,13 @@ public sealed class GG88Strategy : ISiteAutomationStrategy
         SiteRunModel siteRun,
         AutomationExecutionContext executionContext)
     {
-        executionContext.Checkpoint();
-        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Opening registration page...");
-        driver.Navigate().GoToUrl(TargetUrl);
-
-        // TODO: Fill GG88 registration fields after the target HTML DOM is available.
-        executionContext.Delay(TimeSpan.FromSeconds(2));
-        return true;
+        return LobbyMobileWorkflow.ExecuteRegistration(
+            driver,
+            account,
+            siteRun,
+            executionContext,
+            TargetUrl,
+            PhoneNumberFormatter.FormatNineDigitWithoutLeadingZero(account.PhoneNumber));
     }
 
     public bool ExecuteBankSetup(
@@ -31,11 +29,10 @@ public sealed class GG88Strategy : ISiteAutomationStrategy
         SiteRunModel siteRun,
         AutomationExecutionContext executionContext)
     {
-        executionContext.Checkpoint();
-        AutomationUi.SetSiteStatus(account, siteRun, logMessage: "Preparing bank setup...");
-
-        // TODO: Fill GG88 bank setup fields after the target HTML DOM is available.
-        executionContext.Delay(TimeSpan.FromSeconds(2));
-        return true;
+        return LobbyMobileWorkflow.ExecuteBankSetup(
+            driver,
+            account,
+            siteRun,
+            executionContext);
     }
 }

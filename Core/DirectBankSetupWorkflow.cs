@@ -30,7 +30,7 @@ public static class DirectBankSetupWorkflow
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
 
     public static bool IsSupported(TargetSite site) =>
-        GetProfile(site) is not null;
+        site == TargetSite.GG88 || GetProfile(site) is not null;
 
     public static async Task<DirectBankSetupOutcome> TrySetupAsync(
         AccountModel account,
@@ -40,14 +40,6 @@ public static class DirectBankSetupWorkflow
     {
         ArgumentNullException.ThrowIfNull(account);
         ArgumentNullException.ThrowIfNull(session);
-
-        var profile = GetProfile(site);
-        if (profile is null)
-        {
-            return new DirectBankSetupOutcome(
-                DirectBankSetupStatus.NotSupported,
-                $"{site} does not have a direct HTTP bank profile.");
-        }
 
         if (string.IsNullOrWhiteSpace(session.Token))
         {
@@ -64,6 +56,20 @@ public static class DirectBankSetupWorkflow
                 validationError);
         }
 
+        if (site == TargetSite.GG88)
+        {
+            return await GgDirectWorkflow.SetupBankAsync(account, session, cancellationToken)
+                .ConfigureAwait(false);
+        }
+
+        var profile = GetProfile(site);
+        if (profile is null)
+        {
+            return new DirectBankSetupOutcome(
+                DirectBankSetupStatus.NotSupported,
+                $"{site} does not have a direct HTTP bank profile.");
+        }
+
         try
         {
             if (!ProxyConfigurationParser.TryParse(account.Proxy, out var proxyConfiguration, out var proxyError))
@@ -73,7 +79,7 @@ public static class DirectBankSetupWorkflow
                     proxyError ?? "Proxy configuration is invalid.");
             }
 
-            using var handler = CreateHttpClientHandler(proxyConfiguration);
+            using var handler = CreateHttpClientHandler(proxyConfiguration, session.Cookies);
             using var httpClient = new HttpClient(handler)
             {
                 BaseAddress = new Uri(profile.Origin),
@@ -82,79 +88,12 @@ public static class DirectBankSetupWorkflow
 
             ConfigureDefaultHeaders(httpClient, profile, session);
 
-            var bankList = await GetBankListAsync(httpClient, profile, cancellationToken)
-                .ConfigureAwait(false);
-            if (bankList.Outcome is not null)
-            {
-                return bankList.Outcome;
-            }
-
-            var bank = FindMatchingBank(bankList.Banks, account.BankName);
-            if (bank is null)
-            {
-                return new DirectBankSetupOutcome(
-                    DirectBankSetupStatus.Failed,
-                    $"Direct bank setup could not find bank '{account.BankName}'.");
-            }
-
-            var unsupportedReason = GetUnsupportedBankReason(bank, account.Branch);
-            if (unsupportedReason is not null)
-            {
-                return new DirectBankSetupOutcome(
-                    DirectBankSetupStatus.Failed,
-                    unsupportedReason);
-            }
-
-            var template = await GetBankTemplateAsync(
+            return await TrySetupCoreAsync(
+                    account,
+                    profile,
                     httpClient,
-                    bank.BankCode,
                     cancellationToken)
                 .ConfigureAwait(false);
-            if (template.Outcome is not null)
-            {
-                return template.Outcome;
-            }
-
-            var templateAnalysis = AnalyzeTemplate(
-                template.Template,
-                account.AccountNumber,
-                account.FullName);
-            if (templateAnalysis.UnsupportedReason is not null)
-            {
-                return new DirectBankSetupOutcome(
-                    DirectBankSetupStatus.Failed,
-                    templateAnalysis.UnsupportedReason);
-            }
-
-            var payload = BuildBindPayload(
-                account,
-                profile,
-                bank,
-                templateAnalysis);
-            var bindOutcome = await BindBankCardAsync(
-                    httpClient,
-                    payload,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (bindOutcome.Status != DirectBankSetupStatus.Success)
-            {
-                return bindOutcome;
-            }
-
-            var verified = await VerifyBankCardLinkedAsync(
-                    httpClient,
-                    account.AccountNumber,
-                    cancellationToken)
-                .ConfigureAwait(false);
-            if (verified)
-            {
-                return bindOutcome;
-            }
-
-            return new DirectBankSetupOutcome(
-                DirectBankSetupStatus.Failed,
-                "Direct bank setup submitted but could not verify the linked card.",
-                bindOutcome.RawResponse);
         }
         catch (OperationCanceledException)
         {
@@ -208,6 +147,230 @@ public static class DirectBankSetupWorkflow
             Convert.ToBase64String(Encoding.UTF8.GetBytes(MobileUserAgent)));
     }
 
+    private static async Task<DirectBankSetupOutcome> TrySetupCoreAsync(
+        AccountModel account,
+        DirectBankSiteProfile profile,
+        HttpClient httpClient,
+        CancellationToken cancellationToken)
+    {
+        // The web member-center always refreshes these two resources before
+        // opening the bind-card form. The previous direct path skipped them
+        // and submitted a registration-style body, which produced HTTP 400.
+        var bindConfig = await GetBindConfigAsync(httpClient, cancellationToken)
+            .ConfigureAwait(false);
+        if (bindConfig is not null)
+        {
+            return bindConfig;
+        }
+
+        var memberInfo = await GetMemberInfoAsync(httpClient, cancellationToken)
+            .ConfigureAwait(false);
+
+        var bankList = await GetBankListAsync(httpClient, profile, cancellationToken)
+            .ConfigureAwait(false);
+        if (bankList.Outcome is not null)
+        {
+            return bankList.Outcome;
+        }
+
+        var bank = FindMatchingBank(bankList.Banks, account.BankName);
+        if (bank is null)
+        {
+            return new DirectBankSetupOutcome(
+                DirectBankSetupStatus.Failed,
+                $"Direct bank setup could not find bank '{account.BankName}'.");
+        }
+
+        var unsupportedReason = GetUnsupportedBankReason(bank, account.Branch);
+        if (unsupportedReason is not null)
+        {
+            return new DirectBankSetupOutcome(
+                DirectBankSetupStatus.Failed,
+                unsupportedReason);
+        }
+
+        var template = await GetBankTemplateAsync(
+                httpClient,
+                bank.BankCode,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (template.Outcome is not null)
+        {
+            return template.Outcome;
+        }
+
+        var templateAnalysis = AnalyzeTemplate(
+            template.Template,
+            account.AccountNumber,
+            account.FullName);
+        if (templateAnalysis.UnsupportedReason is not null)
+        {
+            return new DirectBankSetupOutcome(
+                DirectBankSetupStatus.Failed,
+                templateAnalysis.UnsupportedReason);
+        }
+
+        var payload = BuildBindPayload(
+            account,
+            profile,
+            bank,
+            templateAnalysis,
+            memberInfo);
+        var bindOutcome = await BindBankCardAsync(
+                httpClient,
+                payload,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (bindOutcome.Status != DirectBankSetupStatus.Success)
+        {
+            // A retry is safe here because the endpoint is idempotent for the
+            // same card and each request uses a fresh encryption key.
+            if (await VerifyBankCardLinkedAsync(
+                    httpClient,
+                    account.AccountNumber,
+                    cancellationToken)
+                .ConfigureAwait(false))
+            {
+                return new DirectBankSetupOutcome(
+                    DirectBankSetupStatus.Success,
+                    "Bank card was already linked.",
+                    bindOutcome.RawResponse);
+            }
+
+            var retryBindOutcome = await BindBankCardAsync(
+                    httpClient,
+                    payload,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (retryBindOutcome.Status != DirectBankSetupStatus.Success)
+            {
+                if (await VerifyBankCardLinkedAsync(
+                        httpClient,
+                        account.AccountNumber,
+                        cancellationToken)
+                    .ConfigureAwait(false))
+                {
+                    return new DirectBankSetupOutcome(
+                        DirectBankSetupStatus.Success,
+                        "Bank card was linked after retry.",
+                        retryBindOutcome.RawResponse);
+                }
+
+                return retryBindOutcome;
+            }
+
+            bindOutcome = retryBindOutcome;
+        }
+
+        var verified = await VerifyBankCardLinkedAsync(
+                httpClient,
+                account.AccountNumber,
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (verified)
+        {
+            return bindOutcome;
+        }
+
+        return new DirectBankSetupOutcome(
+            DirectBankSetupStatus.Failed,
+            "Direct bank setup submitted but could not verify the linked card.",
+            bindOutcome.RawResponse);
+    }
+
+    private static async Task<DirectBankSetupOutcome?> GetBindConfigAsync(
+        HttpClient httpClient,
+        CancellationToken cancellationToken)
+    {
+        using var request = CreateRequest(
+            HttpMethod.Get,
+            "/wps/v2/member/bankCards/bindConfig");
+        using var response = await httpClient.SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
+            .ConfigureAwait(false);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            return new DirectBankSetupOutcome(
+                DirectBankSetupStatus.Failed,
+                DescribeHttpFailure(
+                    "Direct bank bind configuration",
+                    response.StatusCode,
+                    responseText),
+                responseText);
+        }
+
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return null;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            var root = document.RootElement;
+            return IsSuccess(root)
+                ? null
+                : new DirectBankSetupOutcome(
+                    DirectBankSetupStatus.Failed,
+                    ReadMessage(root, "Direct bank bind configuration was rejected."),
+                    responseText);
+        }
+        catch (JsonException)
+        {
+            // Some deployments return an empty/plain configuration response.
+            // HTTP success is enough to continue in that case.
+            return null;
+        }
+    }
+
+    private static async Task<MemberInfoSnapshot> GetMemberInfoAsync(
+        HttpClient httpClient,
+        CancellationToken cancellationToken)
+    {
+        using var request = CreateRequest(HttpMethod.Get, "/wps/member/info");
+        request.Headers.Remove("ModuleId");
+        request.Headers.TryAddWithoutValidation("ModuleId", "COMM3");
+
+        using var response = await httpClient.SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            return MemberInfoSnapshot.Empty;
+        }
+
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            var root = document.RootElement;
+            if (!IsSuccess(root)
+                || !root.TryGetProperty("value", out var value)
+                || value.ValueKind != JsonValueKind.Object)
+            {
+                return MemberInfoSnapshot.Empty;
+            }
+
+            return new MemberInfoSnapshot(
+                TryGetString(value, "mobile")
+                    ?? TryGetString(value, "mobileNum")
+                    ?? string.Empty,
+                TryGetString(value, "countryDialingCode")
+                    ?? TryGetString(value, "countryCode")
+                    ?? string.Empty,
+                TryGetString(value, "payee")
+                    ?? TryGetString(value, "payeeName")
+                    ?? TryGetString(value, "fullName")
+                    ?? string.Empty);
+        }
+        catch (JsonException)
+        {
+            return MemberInfoSnapshot.Empty;
+        }
+    }
+
     private static async Task<BankListResult> GetBankListAsync(
         HttpClient httpClient,
         DirectBankSiteProfile profile,
@@ -227,7 +390,10 @@ public static class DirectBankSetupWorkflow
                 [],
                 new DirectBankSetupOutcome(
                     DirectBankSetupStatus.Failed,
-                    $"Direct bank list returned {(int)response.StatusCode}.",
+                    DescribeHttpFailure(
+                        "Direct bank list",
+                        response.StatusCode,
+                        responseText),
                     responseText));
         }
 
@@ -288,7 +454,10 @@ public static class DirectBankSetupWorkflow
                 null,
                 new DirectBankSetupOutcome(
                     DirectBankSetupStatus.Failed,
-                    $"Direct bank template returned {(int)response.StatusCode}.",
+                    DescribeHttpFailure(
+                        "Direct bank template",
+                        response.StatusCode,
+                        responseText),
                     responseText));
         }
 
@@ -339,14 +508,12 @@ public static class DirectBankSetupWorkflow
         var encrypted = DirectRegistrationCrypto.Encrypt(payloadJson, rsaKey);
 
         using var request = CreateRequest(HttpMethod.Put, "/wps/v2/member/bankCards");
+        // The member-center's withdrawAddCard API sends the DES ciphertext as
+        // the raw JSON request body.  Wrapping it in { "value": ... } (the
+        // registration endpoint's format) makes the bind endpoint return 400.
         request.Headers.TryAddWithoutValidation("Encryption", encrypted.Rsa);
-        request.Headers.TryAddWithoutValidation("X-Digest", encrypted.Des);
-        request.Headers.TryAddWithoutValidation("X-RSA", rsaKey);
         request.Content = new StringContent(
-            JsonSerializer.Serialize(new Dictionary<string, string>
-            {
-                ["value"] = encrypted.Des
-            }, JsonOptions),
+            encrypted.Des,
             Encoding.UTF8,
             "application/json");
 
@@ -359,7 +526,10 @@ public static class DirectBankSetupWorkflow
         {
             return new DirectBankSetupOutcome(
                 DirectBankSetupStatus.Failed,
-                $"Direct bank bind returned {(int)response.StatusCode}.",
+                DescribeHttpFailure(
+                    "Direct bank bind",
+                    response.StatusCode,
+                    responseText),
                 responseText);
         }
 
@@ -394,16 +564,47 @@ public static class DirectBankSetupWorkflow
         string bankAccount,
         CancellationToken cancellationToken)
     {
-        using var request = CreateRequest(HttpMethod.Get, "/wps/relay/MCSFE_getWithdrawAccountInfo");
-        using var response = await httpClient.SendAsync(request, cancellationToken)
-            .ConfigureAwait(false);
-        if (!response.IsSuccessStatusCode)
+        string[] verificationPaths =
+        [
+            "/wps/relay/MCSFE_getWithdrawAccountInfo",
+            "/wps/relay/MCSFE_getBankCards"
+        ];
+
+        const int maxAttempts = 3;
+        for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
-            return false;
+            foreach (var path in verificationPaths)
+            {
+                using var request = CreateRequest(HttpMethod.Get, path);
+                using var response = await httpClient.SendAsync(request, cancellationToken)
+                    .ConfigureAwait(false);
+                if (!response.IsSuccessStatusCode)
+                {
+                    continue;
+                }
+
+                var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                if (ContainsBankAccount(responseText, bankAccount))
+                {
+                    return true;
+                }
+            }
+
+            if (attempt < maxAttempts)
+            {
+                await Task.Delay(
+                        TimeSpan.FromMilliseconds(250 * attempt),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
 
-        var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
-            .ConfigureAwait(false);
+        return false;
+    }
+
+    private static bool ContainsBankAccount(string responseText, string bankAccount)
+    {
         if (responseText.Contains(bankAccount, StringComparison.Ordinal))
         {
             return true;
@@ -479,7 +680,10 @@ public static class DirectBankSetupWorkflow
         CancellationToken cancellationToken)
     {
         var timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        using var request = CreateRequest(HttpMethod.Get, $"/wps/session/key/rsa?_={timestamp}");
+        // Match the member-center client exactly.  The registration endpoint
+        // tolerates the legacy "_=" query name, but the bank-card flow is
+        // served by the older encryption helper which requests "?t=".
+        using var request = CreateRequest(HttpMethod.Get, $"/wps/session/key/rsa?t={timestamp}");
         using var response = await httpClient.SendAsync(request, cancellationToken)
             .ConfigureAwait(false);
         if (!response.IsSuccessStatusCode)
@@ -506,12 +710,21 @@ public static class DirectBankSetupWorkflow
         AccountModel account,
         DirectBankSiteProfile profile,
         BankInfo bank,
-        BankTemplateAnalysis templateAnalysis)
+        BankTemplateAnalysis templateAnalysis,
+        MemberInfoSnapshot memberInfo)
     {
         var phoneNumber = profile.Site == TargetSite.XX88
             ? PhoneNumberFormatter.FormatTenDigitWithLeadingZero(account.PhoneNumber)
             : PhoneNumberFormatter.FormatNineDigitWithoutLeadingZero(account.PhoneNumber);
-        var payeeName = account.FullName.Trim().ToUpperInvariant();
+        var payeeName = string.IsNullOrWhiteSpace(memberInfo.Payee)
+            ? account.FullName.Trim()
+            : memberInfo.Payee.Trim();
+        var mobileNumber = string.IsNullOrWhiteSpace(memberInfo.Mobile)
+            ? phoneNumber
+            : memberInfo.Mobile.Trim();
+        var countryDialingCode = string.IsNullOrWhiteSpace(memberInfo.CountryDialingCode)
+            ? "84"
+            : memberInfo.CountryDialingCode.Trim();
 
         var payload = new Dictionary<string, object?>
         {
@@ -520,9 +733,9 @@ public static class DirectBankSetupWorkflow
             ["validatePaymentPassword"] = account.Level2Password.Trim(),
             ["verificationCode"] = string.Empty,
             ["firebaseIdToken"] = string.Empty,
-            ["mobileNum"] = phoneNumber,
+            ["mobileNum"] = mobileNumber,
             ["cardType"] = "B",
-            ["countryDialingCode"] = "84",
+            ["countryDialingCode"] = countryDialingCode,
             ["playerId"] = templateAnalysis.PlayerId,
             ["customField"] = string.Empty,
             ["email"] = string.Empty,
@@ -648,6 +861,40 @@ public static class DirectBankSetupWorkflow
         ?? TryGetString(root, "errorCode")
         ?? fallback;
 
+    private static string DescribeHttpFailure(
+        string operation,
+        HttpStatusCode statusCode,
+        string? responseText)
+    {
+        var detail = string.Empty;
+        if (!string.IsNullOrWhiteSpace(responseText))
+        {
+            try
+            {
+                using var document = JsonDocument.Parse(responseText);
+                var root = document.RootElement;
+                detail = TryGetString(root, "message")
+                         ?? TryGetValue(root, "errorCode")
+                         ?? TryGetValue(root, "code")
+                         ?? TryGetString(root, "msg")
+                         ?? string.Empty;
+            }
+            catch (JsonException)
+            {
+                detail = Regex.Replace(responseText, "\\s+", " ").Trim();
+            }
+        }
+
+        if (detail.Length > 240)
+        {
+            detail = detail[..240] + "...";
+        }
+
+        return string.IsNullOrWhiteSpace(detail)
+            ? $"{operation} returned {(int)statusCode}."
+            : $"{operation} returned {(int)statusCode}: {detail}";
+    }
+
     private static string? TryGetString(JsonElement root, string name)
     {
         return root.TryGetProperty(name, out var element) && element.ValueKind == JsonValueKind.String
@@ -693,13 +940,15 @@ public static class DirectBankSetupWorkflow
     private static string DigitsOnly(string? value) =>
         Regex.Replace(value ?? string.Empty, "\\D", string.Empty, RegexOptions.CultureInvariant);
 
-    private static HttpClientHandler CreateHttpClientHandler(ProxyConfiguration? proxyConfiguration)
+    private static HttpClientHandler CreateHttpClientHandler(
+        ProxyConfiguration? proxyConfiguration,
+        CookieContainer? cookies = null)
     {
         var handler = new HttpClientHandler
         {
             AllowAutoRedirect = true,
             AutomaticDecompression = DecompressionMethods.All,
-            CookieContainer = new CookieContainer()
+            CookieContainer = cookies ?? new CookieContainer()
         };
 
         if (proxyConfiguration is null)
@@ -764,6 +1013,14 @@ public static class DirectBankSetupWorkflow
         string PlayerId,
         bool IncludeFullName,
         string? UnsupportedReason);
+
+    private sealed record MemberInfoSnapshot(
+        string Mobile,
+        string CountryDialingCode,
+        string Payee)
+    {
+        public static MemberInfoSnapshot Empty { get; } = new(string.Empty, string.Empty, string.Empty);
+    }
 
     private sealed record BankInfo(
         string BankCode,

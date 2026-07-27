@@ -42,14 +42,16 @@ public static class DriverFactory
             profileFolderPath,
             account.UserAgent,
             account.Proxy,
-            headless);
+            headless,
+            site);
     }
 
     public static IWebDriver CreateDriver(
         string profileFolderPath,
         string? userAgent,
         string? proxy,
-        bool headless = false)
+        bool headless = false,
+        TargetSite? site = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profileFolderPath);
         Directory.CreateDirectory(profileFolderPath);
@@ -62,34 +64,19 @@ public static class DriverFactory
         var options = CreateChromeOptions(
             profileFolderPath,
             userAgent,
-            proxyConfiguration,
             headless,
-            out var extensionDir);
+            site);
         var service = ChromeDriverService.CreateDefaultService();
         service.HideCommandPromptWindow = true;
         service.SuppressInitialDiagnosticInformation = true;
 
         IDisposable? cleanupResource = null;
 
-        if (!string.IsNullOrWhiteSpace(extensionDir))
-        {
-            cleanupResource = new ExtensionCleanup(extensionDir);
-        }
-
         if (proxyConfiguration != null && proxyConfiguration.RequiresAuthentication)
         {
             var relay = new LocalAuthenticatedProxyRelay(proxyConfiguration);
             options.AddArgument($"--proxy-server={relay.LocalProxyServer}");
-
-            if (cleanupResource != null)
-            {
-                var existingCleanup = cleanupResource;
-                cleanupResource = new CompositeCleanup(existingCleanup, relay);
-            }
-            else
-            {
-                cleanupResource = relay;
-            }
+            cleanupResource = relay;
         }
         else if (proxyConfiguration != null)
         {
@@ -112,19 +99,68 @@ public static class DriverFactory
 
             // Chặn tải các tài nguyên nặng bằng CDP để cực kỳ nhẹ và chống đơ
             var emptyDict = new System.Collections.Generic.Dictionary<string, object>();
-            var blockedDict = new System.Collections.Generic.Dictionary<string, object>
-            {
-                ["urls"] = new[]
+            var blockedUrls = site is TargetSite.LLWIN or TargetSite.GG88
+                ? new[]
+                {
+                    "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
+                    "*google-analytics.com/*", "*googletagmanager.com/*",
+                    "*doubleclick.net/*", "*facebook.net/tr/*"
+                }
+                : new[]
                 {
                     "*.png", "*.jpg", "*.jpeg", "*.gif", "*.webp", "*.svg", "*.ico",
                     "*.woff", "*.woff2", "*.ttf", "*.otf",
                     "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
-                    "*google-analytics.com/*", "*googletagmanager.com/*", "*doubleclick.net/*", "*facebook.net/tr/*"
-                }
+                    "*google-analytics.com/*", "*googletagmanager.com/*",
+                    "*doubleclick.net/*", "*facebook.net/tr/*"
+                };
+            var blockedDict = new System.Collections.Generic.Dictionary<string, object>
+            {
+                ["urls"] = blockedUrls
             };
 
             driver.ExecuteCdpCommand("Network.enable", emptyDict);
             driver.ExecuteCdpCommand("Network.setBlockedURLs", blockedDict);
+
+            if (site is TargetSite.LLWIN or TargetSite.GG88)
+            {
+                driver.ExecuteCdpCommand(
+                    "Emulation.setDeviceMetricsOverride",
+                    new Dictionary<string, object>
+                    {
+                        ["width"] = 390,
+                        ["height"] = 844,
+                        ["deviceScaleFactor"] = 3,
+                        ["mobile"] = true,
+                        ["screenWidth"] = 390,
+                        ["screenHeight"] = 844,
+                        ["positionX"] = 0,
+                        ["positionY"] = 0,
+                        ["screenOrientation"] = new Dictionary<string, object>
+                        {
+                            ["type"] = "portraitPrimary",
+                            ["angle"] = 0
+                        }
+                    });
+                driver.ExecuteCdpCommand(
+                    "Emulation.setTouchEmulationEnabled",
+                    new Dictionary<string, object>
+                    {
+                        ["enabled"] = true,
+                        ["maxTouchPoints"] = 5
+                    });
+                driver.ExecuteCdpCommand(
+                    "Network.setUserAgentOverride",
+                    new Dictionary<string, object>
+                    {
+                        ["userAgent"] =
+                            "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) " +
+                            "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 " +
+                            "Mobile/15E148 Safari/604.1",
+                        ["acceptLanguage"] = "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                        ["platform"] = "iPhone"
+                    });
+            }
 
             ProxyVerifier.VerifyIfNeeded(driver, proxyConfiguration);
             return driver;
@@ -136,22 +172,13 @@ public static class DriverFactory
         }
     }
 
-    private sealed class ExtensionCleanup : IDisposable
-    {
-        private readonly string? _extensionDir;
-        public ExtensionCleanup(string? extensionDir) => _extensionDir = extensionDir;
-        public void Dispose() => ProxyAuthExtensionRuntime.Cleanup(_extensionDir);
-    }
-
     private static ChromeOptions CreateChromeOptions(
         string profileFolderPath,
         string? userAgent,
-        ProxyConfiguration? proxyConfiguration,
         bool headless,
-        out string? extensionDir)
+        TargetSite? site)
     {
-        extensionDir = null;
-
+        var useMobileLobby = site is TargetSite.LLWIN or TargetSite.GG88;
         var options = new ChromeOptions
         {
             // Registration strategies already wait for their own form/toast
@@ -162,9 +189,13 @@ public static class DriverFactory
         };
         
         // Tắt chế độ tàng hình theo yêu cầu của user, hiện cửa sổ nhỏ
-        options.AddArgument("--window-size=800,600");
+        options.AddArgument(useMobileLobby
+            ? "--window-size=390,844"
+            : "--window-size=800,600");
 
-        if (headless)
+        // These lobbies use an interactive GeeTest image challenge. Keep their
+        // small mobile window visible even when global headless is enabled.
+        if (headless && (!useMobileLobby || site == TargetSite.GG88))
         {
             options.AddArgument("--headless=new");
         }
@@ -186,7 +217,10 @@ public static class DriverFactory
         options.AddArgument("--wm-window-animations-disabled");
         options.AddArgument("--disable-ipc-flooding-protection");
         options.AddArgument("--disable-backgrounding-occluded-windows=false");
-        options.AddArgument("--blink-settings=imagesEnabled=false");
+        if (!useMobileLobby)
+        {
+            options.AddArgument("--blink-settings=imagesEnabled=false");
+        }
 
         // KHÔNG TẮT GPU VÀ WEBGL vì trên Windows việc tắt nó sẽ ép CPU gánh toàn bộ quá trình render web gây CPU 100%
         // options.AddArgument("--disable-gpu"); 
@@ -221,44 +255,28 @@ public static class DriverFactory
         options.AddArgument("--media-cache-size=1");
         
         // Tắt tính năng bằng Preference
-        options.AddUserProfilePreference("profile.default_content_setting_values.images", 2);
-        options.AddUserProfilePreference("profile.managed_default_content_settings.images", 2);
+        if (!useMobileLobby)
+        {
+            options.AddUserProfilePreference("profile.default_content_setting_values.images", 2);
+            options.AddUserProfilePreference("profile.managed_default_content_settings.images", 2);
+        }
         options.AddUserProfilePreference("profile.default_content_setting_values.notifications", 2);
         options.AddUserProfilePreference("profile.default_content_setting_values.geolocation", 2);
         options.AddUserProfilePreference("profile.default_content_setting_values.media_stream_mic", 2);
         options.AddUserProfilePreference("profile.default_content_setting_values.media_stream_camera", 2);
 
-        if (!string.IsNullOrWhiteSpace(userAgent))
+        if (useMobileLobby)
+        {
+            options.AddArgument(
+                "--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) " +
+                "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 " +
+                "Mobile/15E148 Safari/604.1");
+        }
+        else if (!string.IsNullOrWhiteSpace(userAgent))
         {
             options.AddArgument($"--user-agent={userAgent.Trim()}");
         }
 
-        if (proxyConfiguration is null)
-        {
-            return options;
-        }
-
-        extensionDir = ProxyAuthExtensionRuntime.CreateOrUpdate(profileFolderPath, proxyConfiguration);
-        options.AddArgument($"--load-extension={extensionDir}");
-
         return options;
-    }
-
-    private sealed class CompositeCleanup : IDisposable
-    {
-        private readonly IDisposable _a;
-        private readonly IDisposable _b;
-
-        public CompositeCleanup(IDisposable a, IDisposable b)
-        {
-            _a = a;
-            _b = b;
-        }
-
-        public void Dispose()
-        {
-            _a.Dispose();
-            _b.Dispose();
-        }
     }
 }

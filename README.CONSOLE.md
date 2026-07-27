@@ -26,8 +26,8 @@ The admin chat ID and worker concurrency are configured in `appsettings.json`:
     "MaxConcurrentSitesPerAccount": 1,
     "MaxConcurrentBrowserStarts": 1,
     "QueueCapacity": 100,
-    "EnablePrewarmedBrowserPool": true,
-    "PrewarmedBrowserPoolSize": 2,
+    "EnablePrewarmedBrowserPool": false,
+    "PrewarmedBrowserPoolSize": 0,
     "BrowserPoolMaxUsesPerSession": 20,
     "MaxActiveBrowserSessions": 1,
     "MaxCpuPercentBeforeThrottling": 75,
@@ -35,7 +35,8 @@ The admin chat ID and worker concurrency are configured in `appsettings.json`:
     "BrowserAdmissionStabilizationMs": 2000,
     "CpuLowSamplesRequired": 3,
     "Headless": false,
-    "AllowDirectConnectionForTesting": true
+    "EnableDirectHttpRegistration": true,
+    "EnableBrowserFallback": false
   }
 }
 ```
@@ -60,17 +61,15 @@ another. Set it to `2` or `3` only after a burst benchmark on a stronger host.
 full, Telegram producers wait for a worker to free a slot instead of allowing
 unbounded memory growth or silently dropping registrations.
 
-When `EnablePrewarmedBrowserPool` is enabled, the host opens
-`PrewarmedBrowserPoolSize` Chrome sessions before Telegram polling starts.
-Direct-connection jobs rent one session, run one site, then return it after
-cookies, cache, local/session storage, IndexedDB, service workers and extra tabs
-are cleared. Sessions are recreated after `BrowserPoolMaxUsesPerSession` uses.
-Jobs with a proxy or custom user-agent automatically use a dedicated browser
-because those settings are fixed when Chrome starts.
+`EnableDirectHttpRegistration` is the production path for supported sites.
+`EnableBrowserFallback` is deliberately `false`: a direct API failure is
+reported as a failed site and never starts Chrome. Keep
+`EnablePrewarmedBrowserPool` disabled as well; when both browser switches are
+off, the host does not prewarm or create Chrome sessions for Telegram jobs.
+Only enable the fallback switches together for an explicitly chosen legacy site
+that has no direct API profile.
 
-Telegram-created accounts use a short username (`u` plus seven random digits,
-8 characters total). If a site reports that the username already exists, the
-retry generates another username with the same short format.
+Telegram-created accounts use a meaningful short username (a common human name combined with 5 or 6 random digits, e.g. `tuananh84920`, 10–12 characters total). If a site reports that the username already exists, the retry generates another username with the same format.
 
 `MaxActiveBrowserSessions` is the process-wide safety cap. The pool keeps one
 extra blank slot prewarmed, while only the configured number of active
@@ -94,11 +93,21 @@ province/city selection, custom fields, GA confirmation, or an unknown template
 automatically use the existing Selenium flow. This keeps correctness ahead of
 speed when a site changes its form.
 
+The direct HTTP path also preserves registration cookies for the bank phase,
+loads `/wps/v2/member/bankCards/bindConfig` and `/wps/member/info`, and builds
+the payload from the server's mobile number, dialing code, and payee name. Its
+bank-card request follows the member-center protocol: the DES ciphertext is the
+raw request body (it is not wrapped in the registration endpoint's `value`
+object). A rejected or ambiguous submission is checked against both bank-card
+list APIs before one fresh-key retry, preventing a successful bind from being
+reported as a failure.
+
 The release diagnostics are available under `diagnostics/tools`:
 
 ```powershell
 dotnet run --project .\diagnostics\tools\BrowserPoolDiagnostics\BrowserPoolDiagnostics.csproj -c Release
 dotnet run --project .\diagnostics\tools\QueueDiagnostics\QueueDiagnostics.csproj -c Release
+dotnet run --project .\diagnostics\tools\DirectBankProtocolDiagnostics\DirectBankProtocolDiagnostics.csproj -c Release
 dotnet run --project .\diagnostics\tools\LiveRegistrationBenchmark\LiveRegistrationBenchmark.csproj -c Release --no-build RR88
 dotnet run --project .\diagnostics\tools\LiveConcurrencyBenchmark\LiveConcurrencyBenchmark.csproj -c Release --no-build -- RR88 2
 ```
@@ -126,12 +135,19 @@ producer is blocked on a full queue, and idempotent job completion. During host
 shutdown, jobs already accepted into the queue are marked failed and persisted
 instead of being silently left in `Pending`.
 
-When `AllowDirectConnectionForTesting` is `true`, Telegram accepts:
+Telegram always requires an HTTP/HTTPS proxy before creating or queuing a
+registration job. Bulk input therefore always uses five fields:
+`HOTEN|TENNGANHANG|SDT|SOTK|PROXY`. Missing, malformed, and SOCKS5 values are
+rejected before the job enters the queue. The worker checks reachability again
+before either the direct HTTP or Chrome path starts, preventing a direct-IP
+fallback.
 
-- single-account flow without asking for a proxy;
-- bulk rows with either four fields (`HOTEN|TENNGANHANG|SDT|SOTK`) or the original five fields including proxy.
-
-Set it to `false` when every request must provide a proxy again.
+For Proxy.vn purchases, the service follows the API v2 response fields and
+prefers the original endpoint assembled from `ip`, `port`, `user`, and
+`password`. If the response also contains a different intermediary endpoint in
+`proxy`, that endpoint is retained as a verified fallback. An unusable purchase
+is changed through `doiproxy.php` up to three times before the bot reports a
+purchase error; the customer is charged only after a usable endpoint is found.
 
 ## Run
 

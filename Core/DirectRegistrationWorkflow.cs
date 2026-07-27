@@ -30,7 +30,9 @@ public sealed record DirectRegistrationSession(
     string Token,
     string UserName,
     long? CustomerId,
-    string MerchantCode);
+    string MerchantCode,
+    CookieContainer? Cookies = null,
+    GgDirectSession? Gg = null);
 
 public static class DirectRegistrationWorkflow
 {
@@ -44,7 +46,7 @@ public static class DirectRegistrationWorkflow
     private static readonly TimeSpan MinimumEgressStartSpacing = TimeSpan.FromMilliseconds(1200);
 
     public static bool IsSupported(TargetSite site) =>
-        GetProfile(site) is not null;
+        site == TargetSite.GG88 || GetProfile(site) is not null;
 
     public static async Task<DirectRegistrationOutcome> TryRegisterAsync(
         AccountModel account,
@@ -52,6 +54,12 @@ public static class DirectRegistrationWorkflow
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(account);
+
+        if (site == TargetSite.GG88)
+        {
+            return await GgDirectWorkflow.RegisterAsync(account, cancellationToken)
+                .ConfigureAwait(false);
+        }
 
         var profile = GetProfile(site);
         if (profile is null)
@@ -87,7 +95,11 @@ public static class DirectRegistrationWorkflow
             {
             }
 
-            using var handler = CreateHttpClientHandler(proxyConfiguration);
+            // Keep the authenticated cookies set during registration.  The
+            // bank-card API uses the token and these cookies together on
+            // current RR88/MM88 deployments.
+            var cookies = new CookieContainer();
+            using var handler = CreateHttpClientHandler(proxyConfiguration, cookies);
 
             using var httpClient = new HttpClient(handler)
             {
@@ -157,7 +169,7 @@ public static class DirectRegistrationWorkflow
                 var rejectedOutcome = ParseRejectedRegisterResponse(responseText, profile);
                 if (rejectedOutcome is not null)
                 {
-                    return rejectedOutcome;
+                    return AttachCookies(rejectedOutcome, cookies);
                 }
 
                 return new DirectRegistrationOutcome(
@@ -166,7 +178,7 @@ public static class DirectRegistrationWorkflow
                     RawResponse: responseText);
             }
 
-            return ParseRegisterResponse(responseText, profile);
+            return AttachCookies(ParseRegisterResponse(responseText, profile), cookies);
         }
         catch (OperationCanceledException)
         {
@@ -252,13 +264,30 @@ public static class DirectRegistrationWorkflow
             .ConfigureAwait(false);
     }
 
-    private static HttpClientHandler CreateHttpClientHandler(ProxyConfiguration? proxyConfiguration)
+    private static DirectRegistrationOutcome AttachCookies(
+        DirectRegistrationOutcome outcome,
+        CookieContainer cookies)
+    {
+        return outcome.Session is null
+            ? outcome
+            : outcome with
+            {
+                Session = outcome.Session with
+                {
+                    Cookies = cookies
+                }
+            };
+    }
+
+    private static HttpClientHandler CreateHttpClientHandler(
+        ProxyConfiguration? proxyConfiguration,
+        CookieContainer? cookies = null)
     {
         var handler = new HttpClientHandler
         {
             AllowAutoRedirect = true,
             AutomaticDecompression = DecompressionMethods.All,
-            CookieContainer = new CookieContainer()
+            CookieContainer = cookies ?? new CookieContainer()
         };
 
         if (proxyConfiguration is null)
@@ -401,6 +430,12 @@ public static class DirectRegistrationWorkflow
             var proxy = CreateProxyEnvironmentValue(proxyConfiguration);
             process.StartInfo.Environment["HTTP_PROXY"] = proxy;
             process.StartInfo.Environment["HTTPS_PROXY"] = proxy;
+            // The GeeTest helper is a separate Node process. Clear inherited
+            // bypass lists so a machine-level NO_PROXY value cannot silently
+            // send captcha traffic directly while the registration request
+            // itself uses the purchased proxy.
+            process.StartInfo.Environment["NO_PROXY"] = string.Empty;
+            process.StartInfo.Environment["no_proxy"] = string.Empty;
         }
 
         if (!process.Start())

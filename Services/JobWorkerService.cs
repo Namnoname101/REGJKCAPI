@@ -1,6 +1,9 @@
 using BAOCODETOOL.Configuration;
 using BAOCODETOOL.Core;
+using BAOCODETOOL.Data;
 using BAOCODETOOL.Models;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
@@ -15,6 +18,7 @@ public sealed class JobWorkerService : BackgroundService
     private readonly IProfileRepository _profileRepository;
     private readonly AutomationOptions _options;
     private readonly ILogger<JobWorkerService> _logger;
+    private readonly IServiceScopeFactory _scopeFactory;
 
     public JobWorkerService(
         IJobQueueService jobQueue,
@@ -22,7 +26,8 @@ public sealed class JobWorkerService : BackgroundService
         IResultSenderService resultSender,
         IProfileRepository profileRepository,
         IOptions<AutomationOptions> options,
-        ILogger<JobWorkerService> logger)
+        ILogger<JobWorkerService> logger,
+        IServiceScopeFactory scopeFactory)
     {
         _jobQueue = jobQueue;
         _orchestrator = orchestrator;
@@ -30,6 +35,7 @@ public sealed class JobWorkerService : BackgroundService
         _profileRepository = profileRepository;
         _options = options.Value;
         _logger = logger;
+        _scopeFactory = scopeFactory;
     }
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
@@ -113,6 +119,8 @@ public sealed class JobWorkerService : BackgroundService
                 job.Id,
                 job.Account.Username);
 
+            var dbJobId = await RecordJobStartAsync(job);
+
             try
             {
                 await _resultSender.JobStartedAsync(job, stoppingToken);
@@ -184,6 +192,7 @@ public sealed class JobWorkerService : BackgroundService
             try
             {
                 remaining = _jobQueue.Complete(job, finalStatus, errorMessage);
+                await RecordJobEndAsync(dbJobId, finalStatus, errorMessage, job);
             }
             catch (Exception exception)
             {
@@ -242,6 +251,57 @@ public sealed class JobWorkerService : BackgroundService
                      siteRun.Status is not AccountStatus.Success and not AccountStatus.Failed))
         {
             AutomationUi.SetSiteStatus(job.Account, siteRun, AccountStatus.Failed, message);
+        }
+    }
+
+    private async Task<int?> RecordJobStartAsync(RegistrationJob job)
+    {
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var user = await db.Users.FirstOrDefaultAsync(u => u.ChatId == job.ChatId);
+            if (user != null)
+            {
+                var dbJob = new Job
+                {
+                    UserId = user.Id,
+                    Provider = job.Account.SelectedSitesText,
+                    Status = "Running",
+                    StartTime = DateTime.UtcNow,
+                    Logs = $"Bắt đầu chạy tiến trình cho {job.Account.Username}"
+                };
+                db.Jobs.Add(dbJob);
+                await db.SaveChangesAsync();
+                return dbJob.Id;
+            }
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Could not record job start to database for ChatId={ChatId}", job.ChatId);
+        }
+        return null;
+    }
+
+    private async Task RecordJobEndAsync(int? dbJobId, RegistrationJobStatus status, string? errorMessage, RegistrationJob job)
+    {
+        if (dbJobId == null) return;
+        try
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var dbJob = await db.Jobs.FindAsync(dbJobId.Value);
+            if (dbJob != null)
+            {
+                dbJob.Status = status == RegistrationJobStatus.Success ? "Success" : "Failed";
+                dbJob.EndTime = DateTime.UtcNow;
+                dbJob.Logs = errorMessage ?? job.Account.SiteLogText ?? "Hoàn thành thành công";
+                await db.SaveChangesAsync();
+            }
+        }
+        catch (Exception exception)
+        {
+            _logger.LogWarning(exception, "Could not record job end to database for JobId={JobId}", dbJobId);
         }
     }
 }

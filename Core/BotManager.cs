@@ -53,6 +53,7 @@ public sealed class BotManager
         SemaphoreSlim? browserStartupGate = null,
         bool headless = false,
         bool enableDirectHttpRegistration = true,
+        bool enableBrowserFallback = false,
         int maxConcurrentSitesPerAccount = 1,
         IBrowserSessionPool? browserSessionPool = null,
         IBrowserConcurrencyGovernor? browserConcurrencyGovernor = null)
@@ -90,6 +91,7 @@ public sealed class BotManager
                 browserStartupGate,
                 headless,
                 enableDirectHttpRegistration,
+                enableBrowserFallback,
                 browserSessionPool,
                 browserConcurrencyGovernor));
         }
@@ -111,6 +113,7 @@ private async Task RunAccountSitesConcurrentlyAsync(
     SemaphoreSlim? browserStartupGate,
     bool headless,
     bool enableDirectHttpRegistration,
+    bool enableBrowserFallback,
     IBrowserSessionPool? browserSessionPool,
     IBrowserConcurrencyGovernor? browserConcurrencyGovernor)
 {
@@ -121,6 +124,32 @@ private async Task RunAccountSitesConcurrentlyAsync(
     if (siteRuns.Count == 0)
     {
         return;
+    }
+
+    // A proxy is shared by all sites of one account. Verify it once before
+    // fan-out so RR88/MM88 do not each spend a health-check round trip and so
+    // direct API jobs can start immediately after the single preflight.
+    var proxyCheckSlotAcquired = false;
+    try
+    {
+        await semaphore.WaitAsync(executionContext.CancellationToken).ConfigureAwait(false);
+        proxyCheckSlotAcquired = true;
+        if (!await TryVerifyRequiredProxyAsync(
+                account,
+                siteRuns,
+                executionContext,
+                onSiteCompleted)
+            .ConfigureAwait(false))
+        {
+            return;
+        }
+    }
+    finally
+    {
+        if (proxyCheckSlotAcquired)
+        {
+            semaphore.Release();
+        }
     }
 
     using var accountSemaphore = new SemaphoreSlim(maxConcurrentSitesPerAccount);
@@ -135,6 +164,7 @@ private async Task RunAccountSitesConcurrentlyAsync(
             browserStartupGate,
             headless,
             enableDirectHttpRegistration,
+            enableBrowserFallback,
             browserSessionPool,
             browserConcurrencyGovernor))
         .ToArray();
@@ -152,6 +182,7 @@ private async Task RunJobAsync(
     SemaphoreSlim? browserStartupGate,
     bool headless,
     bool enableDirectHttpRegistration,
+    bool enableBrowserFallback,
     IBrowserSessionPool? browserSessionPool,
     IBrowserConcurrencyGovernor? browserConcurrencyGovernor)
 {
@@ -170,15 +201,50 @@ private async Task RunJobAsync(
         accountSlotAcquired = true;
 
         if (enableDirectHttpRegistration
-            && DirectRegistrationWorkflow.IsSupported(siteRun.Site)
-            && await TryRunDirectHttpRegistrationAsync(
+            && DirectRegistrationWorkflow.IsSupported(siteRun.Site))
+        {
+            if (await TryRunDirectHttpRegistrationAsync(
                     account,
                     siteRun,
                     executionContext,
-                    onSiteCompleted)
+                    onSiteCompleted,
+                    enableBrowserFallback)
                 .ConfigureAwait(false))
+            {
+                return;
+            }
+
+            if (!enableBrowserFallback)
+            {
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Failed,
+                    "Direct HTTP registration did not complete. Chrome fallback is disabled.");
+                NotifySiteCompleted(onSiteCompleted);
+                return;
+            }
+        }
+        else if (!enableBrowserFallback
+                 && !LobbyMobileWorkflow.IsSupported(siteRun.Site))
         {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Failed,
+                enableDirectHttpRegistration
+                    ? $"Direct HTTP registration is not supported for {siteRun.Site}. Chrome fallback is disabled."
+                    : "Direct HTTP registration is disabled and Chrome fallback is disabled.");
+            NotifySiteCompleted(onSiteCompleted);
             return;
+        }
+        else if (LobbyMobileWorkflow.IsSupported(siteRun.Site))
+        {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Running,
+                "Direct API requires interactive GeeTest. Switching to the mobile browser workflow...");
         }
 
         AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Waiting for browser slot...");
@@ -220,11 +286,115 @@ private async Task RunJobAsync(
     }
 }
 
+private static void NotifySiteCompleted(Action? callback)
+{
+    try
+    {
+        callback?.Invoke();
+    }
+    catch (Exception callbackException)
+    {
+        Debug.WriteLine($"Site completion callback failed: {callbackException}");
+    }
+}
+
+private static async Task<bool> TryVerifyRequiredProxyAsync(
+    AccountModel account,
+    IReadOnlyList<SiteRunModel> siteRuns,
+    AutomationExecutionContext executionContext,
+    Action? onSiteCompleted)
+{
+    if (!ProxyConfigurationParser.TryParse(
+            account.Proxy,
+            out var proxyConfiguration,
+            out var parseError)
+        || proxyConfiguration is null)
+    {
+        MarkProxyVerificationFailed(
+            account,
+            siteRuns,
+            $"Proxy is required and must be valid: {parseError ?? "proxy data is empty."}",
+            onSiteCompleted);
+        return false;
+    }
+
+    if (proxyConfiguration.IsSocks)
+    {
+        MarkProxyVerificationFailed(
+            account,
+            siteRuns,
+            "SOCKS5 proxy is not supported for registration. Use an HTTP/HTTPS proxy.",
+            onSiteCompleted);
+        return false;
+    }
+
+    executionContext.Checkpoint();
+    foreach (var siteRun in siteRuns)
+    {
+        AutomationUi.SetSiteStatus(
+            account,
+            siteRun,
+            AccountStatus.Running,
+            "Verifying required proxy before registration...");
+    }
+
+    ProxyConnectivityCheckResult connectivity;
+    try
+    {
+        connectivity = await ProxyConnectivityVerifier
+            .CheckAsync(proxyConfiguration, executionContext.CancellationToken)
+            .ConfigureAwait(false);
+    }
+    catch (OperationCanceledException)
+    {
+        throw;
+    }
+    catch (Exception exception)
+    {
+        connectivity = ProxyConnectivityCheckResult.Failure(exception.Message);
+    }
+
+    if (!connectivity.IsSuccess)
+    {
+        MarkProxyVerificationFailed(
+            account,
+            siteRuns,
+            $"Proxy connection failed: {connectivity.Message} Automation was not started to avoid direct-IP fallback.",
+            onSiteCompleted);
+        return false;
+    }
+
+    foreach (var siteRun in siteRuns)
+    {
+        AutomationUi.SetSiteStatus(
+            account,
+            siteRun,
+            AccountStatus.Running,
+            $"Proxy verified. External IP: {connectivity.ObservedIp ?? "unknown"}.");
+    }
+
+    return true;
+}
+
+private static void MarkProxyVerificationFailed(
+    AccountModel account,
+    IReadOnlyList<SiteRunModel> siteRuns,
+    string message,
+    Action? onSiteCompleted)
+{
+    foreach (var siteRun in siteRuns)
+    {
+        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, message);
+        NotifySiteCompleted(onSiteCompleted);
+    }
+}
+
 private static async Task<bool> TryRunDirectHttpRegistrationAsync(
     AccountModel account,
     SiteRunModel siteRun,
     AutomationExecutionContext executionContext,
-    Action? onSiteCompleted)
+    Action? onSiteCompleted,
+    bool enableBrowserFallback)
 {
     var metrics = new SitePerformanceMetrics();
     var totalStopwatch = Stopwatch.StartNew();
@@ -304,6 +474,17 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
             if (outcome.Status == DirectRegistrationStatus.FallbackToBrowser
                 || outcome.Status == DirectRegistrationStatus.NotSupported)
             {
+                if (!enableBrowserFallback)
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        AccountStatus.Failed,
+                        $"Direct HTTP registration unavailable: {outcome.Message} Chrome fallback is disabled.");
+                    handled = true;
+                    return true;
+                }
+
                 AutomationUi.SetSiteStatus(
                     account,
                     siteRun,
@@ -401,7 +582,8 @@ private static void RunSingleSiteExecution(
         IWebDriver driver;
         var browserAcquireStopwatch = Stopwatch.StartNew();
 
-        if (browserSessionPool?.CanServe(account, headless) == true)
+        if (!LobbyMobileWorkflow.IsSupported(siteRun.Site)
+            && browserSessionPool?.CanServe(account, headless) == true)
         {
             AutomationUi.SetSiteStatus(
                 account,

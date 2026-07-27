@@ -37,12 +37,14 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
         var stopwatch = Stopwatch.StartNew();
 
         _logger.LogInformation(
-            "Starting registration. Account={Account}, Sites={Sites}, SiteConcurrency={SiteConcurrency}, BrowserStartLimit={BrowserStartLimit}, Headless={Headless}",
+            "Starting registration. Account={Account}, Sites={Sites}, SiteConcurrency={SiteConcurrency}, BrowserStartLimit={BrowserStartLimit}, Headless={Headless}, DirectApi={DirectApi}, BrowserFallback={BrowserFallback}",
             account.Username,
             account.SelectedSitesText,
             _options.MaxConcurrentSitesPerAccount,
             _options.MaxConcurrentBrowserStarts,
-            _options.Headless);
+            _options.Headless,
+            _options.EnableDirectHttpRegistration,
+            _options.EnableBrowserFallback);
 
         try
         {
@@ -56,6 +58,7 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
                 browserStartupGate: _browserStartupGate,
                 headless: _options.Headless,
                 enableDirectHttpRegistration: _options.EnableDirectHttpRegistration,
+                enableBrowserFallback: _options.EnableBrowserFallback,
                 browserSessionPool: _browserSessionPool,
                 browserConcurrencyGovernor: _browserConcurrencyGovernor);
         }

@@ -54,7 +54,8 @@ public sealed class BrowserSessionPool : IBrowserSessionPool, IHostedService, ID
     {
         ArgumentNullException.ThrowIfNull(account);
 
-        return _options.EnablePrewarmedBrowserPool
+        return _options.EnableBrowserFallback
+               && _options.EnablePrewarmedBrowserPool
                && headless == _options.Headless
                && string.IsNullOrWhiteSpace(account.Proxy)
                && string.IsNullOrWhiteSpace(account.UserAgent)
@@ -65,7 +66,7 @@ public sealed class BrowserSessionPool : IBrowserSessionPool, IHostedService, ID
         TargetSite site,
         CancellationToken cancellationToken)
     {
-        if (!_options.EnablePrewarmedBrowserPool)
+        if (!_options.EnableBrowserFallback || !_options.EnablePrewarmedBrowserPool)
         {
             throw new InvalidOperationException("The prewarmed browser pool is disabled.");
         }
@@ -131,7 +132,7 @@ public sealed class BrowserSessionPool : IBrowserSessionPool, IHostedService, ID
 
     public async Task StartAsync(CancellationToken cancellationToken)
     {
-        if (!_options.EnablePrewarmedBrowserPool)
+        if (!_options.EnableBrowserFallback || !_options.EnablePrewarmedBrowserPool)
         {
             _logger.LogInformation("Prewarmed browser pool is disabled.");
             return;
