@@ -194,6 +194,11 @@
                     <i class="bi bi-shield-check fs-5"></i> Cấu Hình Giá Proxy (Resale Pricing)
                 </button>
             </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link d-flex align-items-center gap-2 fw-semibold px-4 py-2" id="broadcast-tab" data-bs-toggle="tab" data-bs-target="#broadcast-pane" type="button" role="tab">
+                    <i class="bi bi-megaphone-fill fs-5"></i> Gửi Thông Báo (Broadcast)
+                </button>
+            </li>
         </ul>
 
         <!-- Tab Content -->
@@ -256,11 +261,12 @@
                                     <th>Tổng Đã Chi</th>
                                     <th>Số Lượng Jobs</th>
                                     <th>Ngày Tạo</th>
+                                    <th>Thao Tác</th>
                                 </tr>
                             </thead>
                             <tbody id="usersTableBody">
                                 <tr>
-                                    <td colspan="7" class="text-center py-4 text-secondary">Đang tải dữ liệu...</td>
+                                    <td colspan="8" class="text-center py-4 text-secondary">Đang tải dữ liệu...</td>
                                 </tr>
                             </tbody>
                         </table>
@@ -306,6 +312,40 @@
                                 </tr>
                             </tbody>
                         </table>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Broadcast Pane -->
+            <div class="tab-pane fade" id="broadcast-pane" role="tabpanel" tabindex="0">
+                <div class="table-card p-4">
+                    <div class="mb-4">
+                        <h5 class="fw-bold mb-1"><i class="bi bi-megaphone-fill text-warning me-2"></i> Gửi Thông Báo Toàn Thể (Broadcast)</h5>
+                        <p class="text-secondary mb-0 small">Gửi tin nhắn trực tiếp qua Telegram Bot đến tất cả người dùng trong hệ thống</p>
+                    </div>
+                    <div class="row g-4">
+                        <div class="col-12 col-lg-7">
+                            <div class="bg-dark bg-opacity-50 p-4 rounded-3 border border-secondary border-opacity-50">
+                                <label class="form-label text-warning fw-bold mb-2 d-flex align-items-center gap-2">
+                                    <i class="bi bi-chat-left-dots-fill"></i> NỘI DUNG THÔNG BÁO TỪ ADMIN <span class="text-danger">*</span>
+                                </label>
+                                <textarea class="form-control bg-dark text-light border-secondary border-opacity-50 mb-3" id="broadcastMessage" rows="6" placeholder="VD: Cập nhật hệ thống đăng ký siêu tốc, giảm giá proxy từ hôm nay..."></textarea>
+                                <div class="d-flex justify-content-between align-items-center">
+                                    <small class="text-secondary"><i class="bi bi-info-circle"></i> Tin nhắn tự động có lời chào: <b>"Thông báo từ admin:"</b></small>
+                                    <button class="btn btn-warning fw-bold px-4 py-2 d-flex align-items-center gap-2 text-dark" id="btnSendBroadcast" onclick="sendBroadcast()">
+                                        <i class="bi bi-send-fill"></i> Gửi Toàn Thể Ngay
+                                    </button>
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-12 col-lg-5">
+                            <div class="bg-dark p-4 rounded-3 border border-secondary border-opacity-25 h-100">
+                                <h6 class="fw-bold text-secondary mb-3"><i class="bi bi-eye"></i> Xem Trước Tin Nhắn (Preview)</h6>
+                                <div class="p-3 rounded bg-secondary bg-opacity-10 border border-secondary border-opacity-25 text-light" style="font-family: monospace; white-space: pre-wrap; font-size: 0.9rem;"><b>Thông báo từ admin:</b>
+
+<span id="previewText" class="text-info">Nội dung bạn nhập sẽ hiển thị ở đây...</span></div>
+                            </div>
+                        </div>
                     </div>
                 </div>
             </div>
@@ -380,6 +420,62 @@
         </div>
     </div>
 
+    <!-- User Balance Modal -->
+    <div class="modal fade" id="balanceModal" tabindex="-1" aria-hidden="true">
+        <div class="modal-dialog modal-dialog-centered">
+            <div class="modal-content bg-dark text-light border border-secondary border-opacity-50" style="border-radius: 1rem; box-shadow: 0 10px 30px rgba(0,0,0,0.5);">
+                <div class="modal-header border-bottom border-secondary border-opacity-25">
+                    <h5 class="modal-title fw-bold text-warning" id="balanceModalTitle">💰 Điều Chỉnh Tiền & Số Dư User</h5>
+                    <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+                </div>
+                <div class="modal-body p-4">
+                    <form id="balanceForm">
+                        <input type="hidden" id="balUserId">
+                        <div class="p-3 mb-4 rounded bg-secondary bg-opacity-10 border border-secondary border-opacity-25">
+                            <div class="d-flex justify-content-between mb-1">
+                                <span class="text-secondary small">Khách hàng:</span>
+                                <span class="fw-bold text-info" id="balUserInfo">--</span>
+                            </div>
+                            <div class="d-flex justify-content-between">
+                                <span class="text-secondary small">Số dư hiện tại:</span>
+                                <span class="fw-bold text-warning fs-5" id="balCurrentBalance">0 Xu</span>
+                            </div>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label text-secondary small fw-bold">CHẾ ĐỘ ĐIỀU CHỈNH</label>
+                            <select class="form-select bg-dark text-light border-secondary border-opacity-50" id="balMode" onchange="updateBalanceHint()">
+                                <option value="set">⚡ Set chính xác số dư mới (Mặc định)</option>
+                                <option value="add">➕ Cộng thêm Xu vào số dư</option>
+                                <option value="deduct">➖ Trừ bớt Xu khỏi số dư</option>
+                            </select>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label text-secondary small fw-bold" id="balAmountLabel">SỐ TIỀN XU <span class="text-danger">*</span></label>
+                            <input type="number" class="form-control bg-dark text-warning fw-bold fs-5 border-warning border-opacity-50" id="balAmount" placeholder="VD: 100000" min="0" required oninput="updateBalanceHint()">
+                            <small class="text-success" id="balHint" style="font-size: 0.75rem;">Số dư sau điều chỉnh sẽ là: --</small>
+                        </div>
+
+                        <div class="mb-3">
+                            <label class="form-label text-secondary small fw-bold">GHI CHÚ / LÝ DO (TUỲ CHỌN)</label>
+                            <input type="text" class="form-control bg-dark text-light border-secondary border-opacity-50" id="balReason" placeholder="VD: Admin cộng thưởng event / Nạp tay...">
+                        </div>
+
+                        <div class="form-check form-switch mt-4">
+                            <input class="form-check-input" type="checkbox" role="switch" id="balNotify" checked>
+                            <label class="form-check-label text-light fw-medium" for="balNotify">Gửi thông báo thay đổi số dư qua Telegram cho khách hàng</label>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer border-top border-secondary border-opacity-25">
+                    <button type="button" class="btn btn-outline-secondary" data-bs-dismiss="modal">Hủy</button>
+                    <button type="button" class="btn btn-warning fw-bold px-4 text-dark" onclick="saveUserBalance()">💾 Lưu Cập Nhật</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         async function fetchStats() {
@@ -433,15 +529,18 @@
             }
         }
 
+        let currentUsers = [];
+
         async function fetchUsers() {
             try {
                 const res = await fetch('/api/users');
                 if (!res.ok) return;
                 const users = await res.json();
+                currentUsers = users;
                 const tbody = document.getElementById('usersTableBody');
                 
                 if (users.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="7" class="text-center py-4 text-secondary">Chưa có khách hàng nào trong hệ thống.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="8" class="text-center py-4 text-secondary">Chưa có khách hàng nào trong hệ thống.</td></tr>';
                     return;
                 }
 
@@ -456,6 +555,11 @@
                         <td class="text-secondary">${u.totalSpent.toLocaleString('vi-VN')} Xu</td>
                         <td><span class="badge bg-dark border border-secondary text-light px-2 py-1">${u.jobsCount} jobs</span></td>
                         <td class="small text-secondary">${u.createdAt}</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-warning fw-bold d-flex align-items-center gap-1" onclick="openBalanceModal(${u.id})" title="Điều chỉnh tiền/số dư">
+                                <i class="bi bi-coin"></i> Set Tiền
+                            </button>
+                        </td>
                     `;
                     tbody.appendChild(row);
                 });
@@ -596,6 +700,140 @@
                 console.error("Error deleting proxy package:", err);
             }
         }
+
+        let balanceModalInstance = null;
+
+        function openBalanceModal(id) {
+            const user = currentUsers.find(u => u.id === id);
+            if (!user) return;
+
+            document.getElementById('balUserId').value = user.id;
+            document.getElementById('balUserInfo').textContent = `${user.username} (Chat ID: ${user.chatId})`;
+            document.getElementById('balCurrentBalance').textContent = `${user.balance.toLocaleString('vi-VN')} Xu`;
+            document.getElementById('balMode').value = 'set';
+            document.getElementById('balAmount').value = '';
+            document.getElementById('balReason').value = '';
+            document.getElementById('balNotify').checked = true;
+
+            updateBalanceHint();
+
+            if (!balanceModalInstance) {
+                balanceModalInstance = new bootstrap.Modal(document.getElementById('balanceModal'));
+            }
+            balanceModalInstance.show();
+        }
+
+        function updateBalanceHint() {
+            const id = parseInt(document.getElementById('balUserId').value);
+            const user = currentUsers.find(u => u.id === id);
+            if (!user) return;
+            const current = user.balance || 0;
+            const mode = document.getElementById('balMode').value;
+            const val = parseFloat(document.getElementById('balAmount').value) || 0;
+            let predicted = current;
+            let label = "SỐ TIỀN XU MỚI";
+            if (mode === 'set') {
+                predicted = val;
+                label = "SỐ DƯ MỚI (XU)";
+            } else if (mode === 'add') {
+                predicted = current + val;
+                label = "SỐ XU CỘNG THÊM";
+            } else if (mode === 'deduct') {
+                predicted = Math.max(0, current - val);
+                label = "SỐ XU TRỪ BỚT";
+            }
+            document.getElementById('balAmountLabel').innerHTML = label + ' <span class="text-danger">*</span>';
+            document.getElementById('balHint').textContent = `Dự kiến số dư sau điều chỉnh: ${predicted.toLocaleString('vi-VN')} Xu`;
+        }
+
+        async function saveUserBalance() {
+            const id = parseInt(document.getElementById('balUserId').value);
+            const amountVal = document.getElementById('balAmount').value;
+            if (amountVal === "" || isNaN(parseFloat(amountVal))) {
+                alert("Vui lòng nhập số tiền hợp lệ!");
+                return;
+            }
+            const amount = parseFloat(amountVal);
+            if (amount < 0) {
+                alert("Số tiền không được âm!");
+                return;
+            }
+
+            const mode = document.getElementById('balMode').value;
+            const reason = document.getElementById('balReason').value.trim();
+            const notifyUser = document.getElementById('balNotify').checked;
+
+            try {
+                const res = await fetch(`/api/users/balance/${id}`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mode, amount, reason, notifyUser })
+                });
+                if (res.ok) {
+                    if (balanceModalInstance) balanceModalInstance.hide();
+                    fetchUsers();
+                    fetchStats();
+                    alert("✅ Cập nhật số dư thành công!");
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    alert("Lỗi: " + (err.error || "Không thể điều chỉnh số dư!"));
+                }
+            } catch (err) {
+                console.error("Error updating balance:", err);
+                alert("Đã xảy ra lỗi kết nối tới server.");
+            }
+        }
+
+        async function sendBroadcast() {
+            const msgInput = document.getElementById('broadcastMessage');
+            const message = msgInput?.value.trim();
+            if (!message) {
+                alert("Vui lòng nhập nội dung thông báo!");
+                msgInput?.focus();
+                return;
+            }
+
+            if (!confirm("🚀 Bạn có chắc chắn muốn gửi thông báo này đến TOÀN BỘ khách hàng qua Telegram không?")) {
+                return;
+            }
+
+            const btn = document.getElementById('btnSendBroadcast');
+            const originalText = btn.innerHTML;
+            try {
+                btn.disabled = true;
+                btn.innerHTML = '<span class="spinner-border spinner-border-sm me-2" role="status" aria-hidden="true"></span>Đang gửi...';
+
+                const res = await fetch('/api/notifications/broadcast', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message })
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    alert(`✅ Gửi thông báo hoàn tất!\n• Thành công: ${data.successCount} người dùng\n• Thất bại (chặn bot/lỗi): ${data.failCount} người dùng`);
+                    msgInput.value = '';
+                    document.getElementById('previewText').textContent = "Nội dung bạn nhập sẽ hiển thị ở đây...";
+                } else {
+                    const err = await res.json().catch(() => ({}));
+                    alert("Lỗi: " + (err.error || "Không thể gửi thông báo!"));
+                }
+            } catch (err) {
+                console.error("Error sending broadcast:", err);
+                alert("Đã xảy ra lỗi kết nối tới server.");
+            } finally {
+                btn.disabled = false;
+                btn.innerHTML = originalText;
+            }
+        }
+
+        document.getElementById('broadcastMessage')?.addEventListener('input', function(e) {
+            const val = e.target.value.trim();
+            const previewEl = document.getElementById('previewText');
+            if (previewEl) {
+                previewEl.textContent = val || "Nội dung bạn nhập sẽ hiển thị ở đây...";
+            }
+        });
 
         // Fetch immediately and set interval every 5 seconds
         fetchData();

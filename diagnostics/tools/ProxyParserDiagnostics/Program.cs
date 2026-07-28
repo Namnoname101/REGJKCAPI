@@ -24,6 +24,17 @@ foreach (var parserCase in cases)
     var passed = success == parserCase.ShouldParse
         && (!success || requiresAuthentication == parserCase.ShouldAuthenticate);
 
+    if (passed && configuration is not null)
+    {
+        var roundTripParsed = ProxyConfigurationParser.TryParse(
+            configuration.ConnectionString,
+            out var roundTrip,
+            out var roundTripError);
+        passed = roundTripParsed
+            && roundTripError is null
+            && roundTrip == configuration;
+    }
+
     Console.WriteLine($"{(passed ? "PASS" : "FAIL")} {parserCase.Name}: {configuration?.Masked ?? error ?? "empty"}");
 
     if (!passed)

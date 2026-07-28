@@ -8,6 +8,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using BAOCODETOOL.Models;
+using OpenQA.Selenium;
 
 namespace BAOCODETOOL.Core;
 
@@ -44,6 +45,10 @@ public static class DirectRegistrationWorkflow
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web);
     private static readonly ConcurrentDictionary<string, DirectEgressThrottle> EgressThrottles = new();
     private static readonly TimeSpan MinimumEgressStartSpacing = TimeSpan.FromMilliseconds(1200);
+    private static readonly SemaphoreSlim BrowserGeetestConcurrency = new(4, 4);
+    private static readonly ConcurrentDictionary<TargetSite, GeetestSettingsCacheEntry> GeetestSettingsCache = new();
+    private static readonly ConcurrentDictionary<TargetSite, SemaphoreSlim> GeetestSettingsGates = new();
+    private static readonly TimeSpan GeetestSettingsCacheLifetime = TimeSpan.FromMinutes(10);
 
     public static bool IsSupported(TargetSite site) =>
         site == TargetSite.GG88 || GetProfile(site) is not null;
@@ -109,7 +114,11 @@ public static class DirectRegistrationWorkflow
 
             ConfigureDefaultHeaders(httpClient, profile);
 
-            var geetestTask = GetGeetestValidateV4Async(profile, proxyConfiguration, cancellationToken);
+            var geetestTask = GetGeetestValidateV4Async(
+                httpClient,
+                profile,
+                proxyConfiguration,
+                cancellationToken);
 
             await WarmUpSessionAsync(httpClient, profile, cancellationToken)
                 .ConfigureAwait(false);
@@ -123,50 +132,85 @@ public static class DirectRegistrationWorkflow
                     "Direct HTTP could not fetch RSA key.");
             }
 
-            var geetestValidateV4 = await geetestTask.ConfigureAwait(false);
-            if (geetestValidateV4 is null)
+            var geetest = await geetestTask.ConfigureAwait(false);
+            if (geetest is null)
             {
                 return new DirectRegistrationOutcome(
                     DirectRegistrationStatus.FallbackToBrowser,
                     "Direct HTTP could not solve GeeTest token.");
             }
 
-            var payload = BuildPayload(account, profile, geetestValidateV4.Value);
-            var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
-            var encrypted = DirectRegistrationCrypto.Encrypt(payloadJson, rsaKey);
+            var registerResponse = await SendRegisterRequestAsync(
+                    httpClient,
+                    account,
+                    profile,
+                    rsaKey,
+                    geetest.Value,
+                    cancellationToken)
+                .ConfigureAwait(false);
 
-            using var request = new HttpRequestMessage(HttpMethod.Put, "/wps/member/register")
+            if (profile.Site == TargetSite.XX88
+                && IsGeetestRejected(registerResponse.ResponseText))
             {
-                Content = new StringContent(
-                    JsonSerializer.Serialize(new Dictionary<string, string>
+                var activeCaptchaId = geetest.CaptchaId;
+                var refreshedCaptchaId = await ResolveGeetestCaptchaIdAsync(
+                        httpClient,
+                        profile,
+                        rejectedCaptchaId: activeCaptchaId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!string.Equals(
+                        refreshedCaptchaId,
+                        activeCaptchaId,
+                        StringComparison.OrdinalIgnoreCase))
+                {
+                    var refreshedToken = await GetGeetestValidateV4ForCaptchaIdAsync(
+                            profile,
+                            refreshedCaptchaId,
+                            proxyConfiguration,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (refreshedToken is not null)
                     {
-                        ["value"] = encrypted.Des
-                    }, JsonOptions),
-                    Encoding.UTF8,
-                    "application/json")
-            };
+                        activeCaptchaId = refreshedCaptchaId;
+                        registerResponse = await SendRegisterRequestAsync(
+                                httpClient,
+                                account,
+                                profile,
+                                rsaKey,
+                                refreshedToken.Value,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                }
 
-            request.Headers.TryAddWithoutValidation("Language", Language);
-            request.Headers.TryAddWithoutValidation("ModuleId", RegisterModuleId);
-            request.Headers.TryAddWithoutValidation("Encryption", encrypted.Rsa);
-            request.Headers.TryAddWithoutValidation("X-Digest", encrypted.Des);
-            request.Headers.TryAddWithoutValidation("X-RSA", rsaKey);
-            request.Headers.TryAddWithoutValidation(
-                "X-Real-UA",
-                Convert.ToBase64String(Encoding.UTF8.GetBytes(MobileUserAgent)));
-            if (!string.IsNullOrWhiteSpace(profile.MerchantCode))
-            {
-                request.Headers.TryAddWithoutValidation("Merchant", profile.MerchantCode);
+                if (IsGeetestRejected(registerResponse.ResponseText))
+                {
+                    var browserToken = await GetBrowserGeetestValidateV4Async(
+                            profile,
+                            activeCaptchaId,
+                            proxyConfiguration,
+                            cancellationToken)
+                        .ConfigureAwait(false);
+                    if (browserToken is not null)
+                    {
+                        registerResponse = await SendRegisterRequestAsync(
+                                httpClient,
+                                account,
+                                profile,
+                                rsaKey,
+                                browserToken.Value,
+                                cancellationToken)
+                            .ConfigureAwait(false);
+                    }
+                }
             }
 
-            using var response = await httpClient.SendAsync(request, cancellationToken)
-                .ConfigureAwait(false);
-            var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
-                .ConfigureAwait(false);
-
-            if (!response.IsSuccessStatusCode)
+            if (!registerResponse.IsSuccessStatusCode)
             {
-                var rejectedOutcome = ParseRejectedRegisterResponse(responseText, profile);
+                var rejectedOutcome = ParseRejectedRegisterResponse(
+                    registerResponse.ResponseText,
+                    profile);
                 if (rejectedOutcome is not null)
                 {
                     return AttachCookies(rejectedOutcome, cookies);
@@ -174,11 +218,13 @@ public static class DirectRegistrationWorkflow
 
                 return new DirectRegistrationOutcome(
                     DirectRegistrationStatus.FallbackToBrowser,
-                    $"Direct HTTP register returned {(int)response.StatusCode}.",
-                    RawResponse: responseText);
+                    $"Direct HTTP register returned {(int)registerResponse.StatusCode}.",
+                    RawResponse: registerResponse.ResponseText);
             }
 
-            return AttachCookies(ParseRegisterResponse(responseText, profile), cookies);
+            return AttachCookies(
+                ParseRegisterResponse(registerResponse.ResponseText, profile),
+                cookies);
         }
         catch (OperationCanceledException)
         {
@@ -189,6 +235,73 @@ public static class DirectRegistrationWorkflow
             return new DirectRegistrationOutcome(
                 DirectRegistrationStatus.FallbackToBrowser,
                 $"Direct HTTP exception: {exception.Message}");
+        }
+    }
+
+    private static async Task<RegisterHttpResponse> SendRegisterRequestAsync(
+        HttpClient httpClient,
+        AccountModel account,
+        DirectRegistrationSiteProfile profile,
+        string rsaKey,
+        JsonElement geetestValidateV4,
+        CancellationToken cancellationToken)
+    {
+        var payload = BuildPayload(account, profile, geetestValidateV4);
+        var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
+        var encrypted = DirectRegistrationCrypto.Encrypt(payloadJson, rsaKey);
+
+        using var request = new HttpRequestMessage(HttpMethod.Put, "/wps/member/register")
+        {
+            Content = new StringContent(
+                JsonSerializer.Serialize(new Dictionary<string, string>
+                {
+                    ["value"] = encrypted.Des
+                }, JsonOptions),
+                Encoding.UTF8,
+                "application/json")
+        };
+
+        request.Headers.TryAddWithoutValidation("Language", Language);
+        request.Headers.TryAddWithoutValidation("ModuleId", RegisterModuleId);
+        request.Headers.TryAddWithoutValidation("Encryption", encrypted.Rsa);
+        request.Headers.TryAddWithoutValidation("X-Digest", encrypted.Des);
+        request.Headers.TryAddWithoutValidation("X-RSA", rsaKey);
+        request.Headers.TryAddWithoutValidation(
+            "X-Real-UA",
+            Convert.ToBase64String(Encoding.UTF8.GetBytes(MobileUserAgent)));
+        if (!string.IsNullOrWhiteSpace(profile.MerchantCode))
+        {
+            request.Headers.TryAddWithoutValidation("Merchant", profile.MerchantCode);
+        }
+
+        using var response = await httpClient.SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
+            .ConfigureAwait(false);
+        return new RegisterHttpResponse(
+            response.IsSuccessStatusCode,
+            response.StatusCode,
+            responseText);
+    }
+
+    private static bool IsGeetestRejected(string responseText)
+    {
+        if (string.IsNullOrWhiteSpace(responseText))
+        {
+            return false;
+        }
+
+        try
+        {
+            using var document = JsonDocument.Parse(responseText);
+            return string.Equals(
+                TryGetString(document.RootElement, "errorCode"),
+                "geetest_captcha_err",
+                StringComparison.OrdinalIgnoreCase);
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 
@@ -360,12 +473,141 @@ public static class DirectRegistrationWorkflow
             .Trim();
     }
 
-    private static async Task<JsonElement?> GetGeetestValidateV4Async(
+    private static async Task<GeetestTokenResult?> GetGeetestValidateV4Async(
+        HttpClient httpClient,
         DirectRegistrationSiteProfile profile,
         ProxyConfiguration? proxyConfiguration,
         CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(profile.GeetestCaptchaId))
+        var captchaId = await ResolveGeetestCaptchaIdAsync(
+                httpClient,
+                profile,
+                rejectedCaptchaId: null,
+                cancellationToken)
+            .ConfigureAwait(false);
+        var token = await GetGeetestValidateV4ForCaptchaIdAsync(
+                profile,
+                captchaId,
+                proxyConfiguration,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return token is null
+            ? null
+            : new GeetestTokenResult(captchaId, token.Value);
+    }
+
+    private static async Task<string> ResolveGeetestCaptchaIdAsync(
+        HttpClient httpClient,
+        DirectRegistrationSiteProfile profile,
+        string? rejectedCaptchaId,
+        CancellationToken cancellationToken)
+    {
+        if (TryGetCachedGeetestCaptchaId(profile.Site, rejectedCaptchaId, out var cachedCaptchaId))
+        {
+            return cachedCaptchaId;
+        }
+
+        var gate = GeetestSettingsGates.GetOrAdd(profile.Site, _ => new SemaphoreSlim(1, 1));
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (TryGetCachedGeetestCaptchaId(profile.Site, rejectedCaptchaId, out cachedCaptchaId))
+            {
+                return cachedCaptchaId;
+            }
+
+            try
+            {
+                using var response = await httpClient.GetAsync(
+                        "/wps/system/settings/consolidated",
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (response.IsSuccessStatusCode)
+                {
+                    var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                    using var document = JsonDocument.Parse(responseText);
+                    if (TryReadGeetestCaptchaId(document.RootElement, out var liveCaptchaId))
+                    {
+                        GeetestSettingsCache[profile.Site] = new GeetestSettingsCacheEntry(
+                            liveCaptchaId,
+                            DateTimeOffset.UtcNow.Add(GeetestSettingsCacheLifetime));
+                        return liveCaptchaId;
+                    }
+                }
+            }
+            catch (HttpRequestException)
+            {
+            }
+            catch (JsonException)
+            {
+            }
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+            {
+            }
+
+            return profile.GeetestCaptchaId;
+        }
+        finally
+        {
+            gate.Release();
+        }
+    }
+
+    private static bool TryGetCachedGeetestCaptchaId(
+        TargetSite site,
+        string? rejectedCaptchaId,
+        out string captchaId)
+    {
+        captchaId = string.Empty;
+        if (!GeetestSettingsCache.TryGetValue(site, out var cached)
+            || cached.ExpiresAt <= DateTimeOffset.UtcNow
+            || (!string.IsNullOrWhiteSpace(rejectedCaptchaId)
+                && string.Equals(
+                    cached.CaptchaId,
+                    rejectedCaptchaId,
+                    StringComparison.OrdinalIgnoreCase)))
+        {
+            return false;
+        }
+
+        captchaId = cached.CaptchaId;
+        return true;
+    }
+
+    private static bool TryReadGeetestCaptchaId(JsonElement root, out string captchaId)
+    {
+        captchaId = string.Empty;
+        if (!root.TryGetProperty("value", out var value)
+            || value.ValueKind != JsonValueKind.Object
+            || !value.TryGetProperty("gw", out var gateway)
+            || gateway.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        var version = TryGetString(gateway, "GEETEST_VERSION");
+        var candidate = TryGetString(gateway, "GEETEST_ID");
+        if (!string.Equals(version, "v4", StringComparison.OrdinalIgnoreCase)
+            || string.IsNullOrWhiteSpace(candidate)
+            || candidate.Length is < 16 or > 128
+            || candidate.Any(character => !char.IsLetterOrDigit(character)
+                                          && character is not '-' and not '_'))
+        {
+            return false;
+        }
+
+        captchaId = candidate;
+        return true;
+    }
+
+    private static async Task<JsonElement?> GetGeetestValidateV4ForCaptchaIdAsync(
+        DirectRegistrationSiteProfile profile,
+        string captchaId,
+        ProxyConfiguration? proxyConfiguration,
+        CancellationToken cancellationToken)
+    {
+        if (string.IsNullOrWhiteSpace(captchaId))
         {
             return null;
         }
@@ -381,6 +623,7 @@ public static class DirectRegistrationWorkflow
         {
             var token = await RunGeetestTokenProcessAsync(
                     profile,
+                    captchaId,
                     scriptPath,
                     proxyConfiguration,
                     cancellationToken)
@@ -402,6 +645,7 @@ public static class DirectRegistrationWorkflow
 
     private static async Task<JsonElement?> RunGeetestTokenProcessAsync(
         DirectRegistrationSiteProfile profile,
+        string captchaId,
         string scriptPath,
         ProxyConfiguration? proxyConfiguration,
         CancellationToken cancellationToken)
@@ -419,11 +663,15 @@ public static class DirectRegistrationWorkflow
         };
         process.StartInfo.ArgumentList.Add("--use-env-proxy");
         process.StartInfo.ArgumentList.Add(scriptPath);
-        process.StartInfo.ArgumentList.Add(profile.GeetestCaptchaId);
+        process.StartInfo.ArgumentList.Add(captchaId);
         process.StartInfo.ArgumentList.Add(profile.GeetestSdkCdn);
         process.StartInfo.ArgumentList.Add(profile.GeetestSdkVersion);
         process.StartInfo.ArgumentList.Add(profile.Origin);
         process.StartInfo.ArgumentList.Add(profile.RegistrationUrl);
+        process.StartInfo.ArgumentList.Add(
+            profile.Site == TargetSite.XX88
+                ? MobileUserAgent
+                : string.Empty);
 
         if (proxyConfiguration is not null && !proxyConfiguration.IsSocks)
         {
@@ -475,12 +723,174 @@ public static class DirectRegistrationWorkflow
         try
         {
             using var document = JsonDocument.Parse(output);
-            return document.RootElement.Clone();
+            return IsUsableGeetestValidateV4(document.RootElement)
+                ? document.RootElement.Clone()
+                : null;
         }
         catch (JsonException)
         {
             return null;
         }
+    }
+
+    private static async Task<JsonElement?> GetBrowserGeetestValidateV4Async(
+        DirectRegistrationSiteProfile profile,
+        string captchaId,
+        ProxyConfiguration? proxyConfiguration,
+        CancellationToken cancellationToken)
+    {
+        await BrowserGeetestConcurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return await Task.Run<JsonElement?>(() =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var profileRoot = Path.Combine(
+                    Path.GetTempPath(),
+                    "VibecodeGeetestToken",
+                    Guid.NewGuid().ToString("N"));
+
+                try
+                {
+                    using var driver = DriverFactory.CreateDriver(
+                        profileRoot,
+                        userAgent: null,
+                        proxy: proxyConfiguration?.ConnectionString,
+                        headless: true,
+                        site: profile.Site,
+                        verifyProxy: false,
+                        deleteProfileOnDispose: true);
+                    driver.Navigate().GoToUrl(profile.RegistrationUrl);
+
+                    var javaScript = (IJavaScriptExecutor)driver;
+                    var initDeadline = DateTimeOffset.UtcNow.AddSeconds(12);
+                    while (DateTimeOffset.UtcNow < initDeadline)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        if (javaScript.ExecuteScript(
+                                "return typeof window.initBotion === 'function';")
+                            is true)
+                        {
+                            break;
+                        }
+
+                        Thread.Sleep(100);
+                    }
+
+                    if (javaScript.ExecuteScript(
+                            "return typeof window.initBotion === 'function';")
+                        is not true)
+                    {
+                        return null;
+                    }
+
+                    var tokenJson = javaScript.ExecuteAsyncScript(
+                        """
+                        const captchaId = arguments[0];
+                        const done = arguments[arguments.length - 1];
+                        let completed = false;
+                        let poll = null;
+                        let timeout = null;
+                        const finish = value => {
+                            if (completed) return;
+                            completed = true;
+                            if (poll) clearInterval(poll);
+                            if (timeout) clearTimeout(timeout);
+                            done(value ? JSON.stringify(value) : null);
+                        };
+                        timeout = setTimeout(() => finish(null), 8000);
+
+                        try {
+                            window.initBotion({
+                                captchaId,
+                                product: 'bind',
+                                language: 'vie',
+                                hideSuccess: true,
+                                timeout: 5000,
+                                protocol: 'https://'
+                            }, captcha => {
+                                const capture = () => {
+                                    try {
+                                        const value = captcha.getValidate?.();
+                                        if (value && typeof value === 'object') finish(value);
+                                    } catch {}
+                                };
+                                captcha.onSuccess?.(capture);
+                                captcha.onError?.(() => finish(null));
+                                const verify = () => {
+                                    try {
+                                        captcha.verify();
+                                        poll = setInterval(capture, 50);
+                                    } catch {
+                                        finish(null);
+                                    }
+                                };
+                                if (captcha.onReady) captcha.onReady(verify);
+                                else verify();
+                            });
+                        } catch {
+                            finish(null);
+                        }
+                        """,
+                        captchaId)?.ToString();
+
+                    if (string.IsNullOrWhiteSpace(tokenJson))
+                    {
+                        return null;
+                    }
+
+                    using var document = JsonDocument.Parse(tokenJson);
+                    return IsUsableGeetestValidateV4(document.RootElement)
+                        ? document.RootElement.Clone()
+                        : null;
+                }
+                catch (WebDriverException)
+                {
+                    return null;
+                }
+                catch (JsonException)
+                {
+                    return null;
+                }
+                finally
+                {
+                    try
+                    {
+                        if (Directory.Exists(profileRoot))
+                        {
+                            Directory.Delete(profileRoot, recursive: true);
+                        }
+                    }
+                    catch
+                    {
+                    }
+                }
+            }, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            BrowserGeetestConcurrency.Release();
+        }
+    }
+
+    private static bool IsUsableGeetestValidateV4(JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        foreach (var name in new[] { "lot_number", "captcha_output", "pass_token", "gen_time" })
+        {
+            if (!value.TryGetProperty(name, out var field)
+                || field.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(field.GetString()))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private static string? ResolveGeetestScriptPath()
@@ -584,8 +994,17 @@ public static class DirectRegistrationWorkflow
                     Session: session);
             }
 
+            var errorCode = TryGetString(root, "errorCode");
+            if (string.Equals(errorCode, "geetest_captcha_err", StringComparison.OrdinalIgnoreCase))
+            {
+                return new DirectRegistrationOutcome(
+                    DirectRegistrationStatus.FallbackToBrowser,
+                    "Direct HTTP GeeTest token was rejected.",
+                    RawResponse: responseText);
+            }
+
             var message = TryGetString(root, "message")
-                          ?? TryGetString(root, "errorCode")
+                          ?? errorCode
                           ?? "Direct HTTP registration was rejected.";
             var rawLower = responseText.ToLowerInvariant();
             var usernameConflict = rawLower.Contains("username", StringComparison.Ordinal)
@@ -685,7 +1104,7 @@ public static class DirectRegistrationWorkflow
                 "xx88",
                 "gioithieu",
                 "gql2969",
-                "7c598dd83e102fbf19bdb136198f8e4e",
+                "2e3984aebc5904671a2a0a7c284b8c79",
                 "https://images.0998455.com/",
                 "1",
                 true),
@@ -705,6 +1124,17 @@ public static class DirectRegistrationWorkflow
         string GeetestSdkCdn,
         string GeetestSdkVersion,
         bool RequiresProxyForDirect);
+
+    private sealed record RegisterHttpResponse(
+        bool IsSuccessStatusCode,
+        HttpStatusCode StatusCode,
+        string ResponseText);
+
+    private sealed record GeetestTokenResult(string CaptchaId, JsonElement Value);
+
+    private sealed record GeetestSettingsCacheEntry(
+        string CaptchaId,
+        DateTimeOffset ExpiresAt);
 }
 
 internal sealed class DirectEgressThrottle

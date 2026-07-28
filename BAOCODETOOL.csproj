@@ -25,6 +25,7 @@
   <ItemGroup>
     <Compile Remove="App.xaml.cs" />
     <Compile Remove="AssemblyInfo.cs" />
+    <Compile Remove="artifacts\**\*.cs" />
     <Compile Remove="diagnostics\tools\**\*.cs" />
     <Compile Remove="ViewModels\**\*.cs" />
     <Compile Remove="Views\**\*.cs" />

@@ -114,4 +114,36 @@ public sealed class UserService : IUserService
         _logger.LogInformation("Deducted balance {Amount} from ChatId: {ChatId}. New Balance: {Balance}", amount, chatId, user.Balance);
         return true;
     }
+
+    public async Task<bool> SetBalanceAsync(long chatId, decimal newBalance, string description, string? referenceId = null, CancellationToken cancellationToken = default)
+    {
+        if (newBalance < 0)
+        {
+            _logger.LogWarning("Attempted to set negative balance ({Amount}) for ChatId: {ChatId}", newBalance, chatId);
+            return false;
+        }
+
+        var user = await GetUserByChatIdAsync(chatId, null, cancellationToken);
+        var diff = newBalance - user.Balance;
+        if (diff == 0) return true;
+
+        user.Balance = newBalance;
+        user.UpdatedAt = DateTime.UtcNow;
+
+        var transaction = new Transaction
+        {
+            UserId = user.Id,
+            Amount = diff,
+            Type = diff > 0 ? "Deposit" : "Withdraw",
+            Description = description,
+            ReferenceId = referenceId ?? "ADMIN_SET",
+            CreatedAt = DateTime.UtcNow
+        };
+
+        _dbContext.Transactions.Add(transaction);
+        await _dbContext.SaveChangesAsync(cancellationToken);
+
+        _logger.LogInformation("Set balance to {NewBalance} (Diff: {Diff}) for ChatId: {ChatId}", newBalance, diff, chatId);
+        return true;
+    }
 }

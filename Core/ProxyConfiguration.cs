@@ -20,6 +20,10 @@ public sealed record ProxyConfiguration(
 
     public string ProxyServerArgument => $"{Scheme}://{Server}";
 
+    public string ConnectionString => RequiresAuthentication
+        ? $"{Scheme}://{Uri.EscapeDataString(Username!)}:{Uri.EscapeDataString(Password!)}@{Server}"
+        : ProxyServerArgument;
+
     public string Masked => RequiresAuthentication
         ? $"{Scheme}://{Username}:***@{Server}"
         : ProxyServerArgument;

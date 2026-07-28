@@ -43,7 +43,6 @@ internal static partial class GgDirectWorkflow
     private static readonly ConcurrentDictionary<string, DirectEgressThrottle> EgressThrottles = new();
     private static readonly ConcurrentDictionary<string, string> BankCodeCache = new();
     private static readonly SemaphoreSlim BankSettingsGate = new(1, 1);
-    private static int BankSettingsLoaded;
     private static readonly TimeSpan MinimumEgressStartSpacing = TimeSpan.FromMilliseconds(1200);
     private static readonly SemaphoreSlim GeeGuardConcurrency = new(8, 8);
 
@@ -385,13 +384,6 @@ internal static partial class GgDirectWorkflow
                 return new BankCodeResolution(cached, "live settings cache");
             }
 
-            if (Volatile.Read(ref BankSettingsLoaded) == 1)
-            {
-                return new BankCodeResolution(
-                    FindKnownVietnameseBankCode(bankName),
-                    "fallback mapping");
-            }
-
             var unixTime = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
             var settingsPath = "api/finance/certify/withdrawSettingV3"
                                + $"?siteCode={Uri.EscapeDataString(siteCode)}"
@@ -419,10 +411,7 @@ internal static partial class GgDirectWorkflow
             if (response.IsSuccessStatusCode && !string.IsNullOrWhiteSpace(decoded))
             {
                 using var document = JsonDocument.Parse(decoded);
-                if (CacheBankCodes(document.RootElement) > 0)
-                {
-                    Volatile.Write(ref BankSettingsLoaded, 1);
-                }
+                CacheBankCodes(document.RootElement);
 
                 if (TryGetCachedBankCode(cacheKey, out cached))
                 {
@@ -455,22 +444,56 @@ internal static partial class GgDirectWorkflow
 
     private static int CacheBankCodes(JsonElement root)
     {
-        var cached = 0;
-        foreach (var item in EnumerateObjects(root))
-        {
-            var name = TryGetObjectString(item, "Name");
-            var code = TryGetObjectString(item, "en");
-            if (string.IsNullOrWhiteSpace(name) || string.IsNullOrWhiteSpace(code))
+        var banks = EnumerateObjects(root)
+            .Select(item => new
             {
-                continue;
-            }
+                Name = TryGetObjectString(item, "Name"),
+                Code = TryGetObjectString(item, "en")
+            })
+            .Where(bank => !string.IsNullOrWhiteSpace(bank.Name)
+                           && !string.IsNullOrWhiteSpace(bank.Code))
+            .Select(bank => (Name: bank.Name!, Code: bank.Code!))
+            .Distinct()
+            .ToArray();
 
-            BankCodeCache[Compact(name)] = code;
-            BankCodeCache[Compact(code)] = code;
-            cached++;
+        // Reserve every provider code first. Some display names are also codes
+        // for another live entry (for example DONGABANK), so code keys must win.
+        foreach (var bank in banks)
+        {
+            BankCodeCache[Compact(bank.Code)] = bank.Code;
         }
 
-        return cached;
+        foreach (var bank in banks)
+        {
+            CacheBankNameAliases(bank.Name, bank.Code);
+        }
+
+        return banks.Length;
+    }
+
+    private static void CacheBankNameAliases(string name, string code)
+    {
+        AddBankAlias(name, code);
+        AddBankAlias(BankAliasRegex().Replace(name, string.Empty), code);
+
+        foreach (Match match in BankAliasRegex().Matches(name))
+        {
+            foreach (var alias in match.Groups[1].Value.Split(
+                         ['/', ',', ';', '|'],
+                         StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                AddBankAlias(alias, code);
+            }
+        }
+    }
+
+    private static void AddBankAlias(string alias, string code)
+    {
+        var key = Compact(alias);
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            BankCodeCache.TryAdd(key, code);
+        }
     }
 
     private static bool TryGetCachedBankCode(string cacheKey, out string code)
@@ -937,28 +960,28 @@ internal static partial class GgDirectWorkflow
         {
             "vietcombank" or "nganhangngoaithuongvietnam" or "vcb" => "VIETCOMB",
             "techcombank" or "nganhangkythuongvietnam" or "tcb" => "TECHCOMB",
-            "vietinbank" or "nganhangcongthuongvietnam" or "ctg" => "CTG",
+            "vietinbank" or "nganhangcongthuongvietnam" or "ctg" or "vtb" => "VIETINBA",
             "bidv" or "nganhangdautuvaphattrienvietnam" => "BIDV",
             "acb" or "nganhangachau" => "ACB",
             "mbbank" or "mb" or "nganhangquandoi" or "mbb" => "MBBANK",
-            "vpbank" or "vpb" => "VPB",
+            "vpbank" or "vpb" => "VPBANK",
             "vib" => "VIB",
-            "tpbank" or "tpb" => "TPB",
-            "sacombank" or "stb" => "STB",
-            "hdbank" or "hdb" => "HDB",
+            "tpbank" or "tpb" => "TPBANK",
+            "sacombank" or "stb" => "SBANK",
+            "hdbank" or "hdb" => "HDBANK",
             "shb" => "SHB",
-            "eximbank" or "eib" => "EIB",
-            "msb" => "MSB",
-            "ocb" => "OCB",
-            "seabank" or "ssb" => "SSB",
+            "eximbank" or "eib" => "EXIM",
+            "msb" or "maritimebank" => "MARIBANK",
+            "ocb" => "OCBANK",
+            "seabank" or "ssb" => "SEABANK",
             "abbank" or "abb" => "ABB",
-            "namabank" or "nab" => "NAB",
-            "pvcombank" or "pvcb" => "PVCB",
-            "vietabank" or "vab" => "VAB",
+            "namabank" or "nab" => "NABANK",
+            "pvcombank" or "pvcb" => "PVBANK",
+            "vietabank" or "vab" => "VABANK",
             "bacabank" or "bab" => "BAB",
-            "kienlongbank" or "klb" => "KLB",
+            "kienlongbank" or "klb" => "KLBANK",
             "ncb" => "NCB",
-            "lpbank" or "lienvietpostbank" or "lpb" => "LPB",
+            "lpbank" or "lienvietpostbank" or "lpb" => "LVPBANK",
             _ => null
         };
     }
@@ -1650,7 +1673,8 @@ internal static partial class GgDirectWorkflow
                     userAgent: null,
                     proxy: proxyValue,
                     headless: true,
-                    TargetSite.GG88);
+                    site: TargetSite.GG88,
+                    deleteProfileOnDispose: true);
                 driver.Navigate().GoToUrl(RegistrationUrl);
                 var js = (IJavaScriptExecutor)driver;
                 var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
@@ -1726,11 +1750,7 @@ internal static partial class GgDirectWorkflow
 
         if (proxy is not null)
         {
-            var proxyUri = new UriBuilder(proxy.Scheme, proxy.Host, proxy.Port)
-            {
-                UserName = proxy.Username,
-                Password = proxy.Password
-            }.Uri.AbsoluteUri;
+            var proxyUri = proxy.ConnectionString;
             process.StartInfo.Environment["HTTP_PROXY"] = proxyUri;
             process.StartInfo.Environment["HTTPS_PROXY"] = proxyUri;
             process.StartInfo.Environment["NO_PROXY"] = string.Empty;
@@ -1886,6 +1906,9 @@ internal static partial class GgDirectWorkflow
 
     [GeneratedRegex("siteCode:\\s*\"([^\"]+)\"", RegexOptions.IgnoreCase)]
     private static partial Regex SiteCodeRegex();
+
+    [GeneratedRegex("\\(([^)]*)\\)")]
+    private static partial Regex BankAliasRegex();
 
     private sealed record GgApiResponse(
         HttpStatusCode StatusCode,

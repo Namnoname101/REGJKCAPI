@@ -2,11 +2,43 @@ using System.Net;
 using System.Net.Sockets;
 using System.Text;
 using BAOCODETOOL.Configuration;
+using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
 using BAOCODETOOL.Services;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using OpenQA.Selenium;
+
+if (args.Any(argument => argument.Equals("temporary-profile", StringComparison.OrdinalIgnoreCase)))
+{
+    var temporaryRoot = Path.Combine(
+        Path.GetTempPath(),
+        "BAOCODETOOL",
+        "BrowserProfiles");
+    var before = Directory.Exists(temporaryRoot)
+        ? Directory.GetDirectories(temporaryRoot).ToHashSet(StringComparer.OrdinalIgnoreCase)
+        : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+    var account = new AccountModel();
+    using (var driver = DriverFactory.CreateDriver(account, TargetSite.RR88, headless: true))
+    {
+        _ = driver.Url;
+    }
+
+    await Task.Delay(250);
+    var leaked = Directory.Exists(temporaryRoot)
+        ? Directory.GetDirectories(temporaryRoot)
+            .Where(path => !before.Contains(path))
+            .ToArray()
+        : [];
+    if (leaked.Length > 0)
+    {
+        throw new InvalidOperationException(
+            $"Temporary browser profiles were not deleted: {string.Join(", ", leaked)}");
+    }
+
+    Console.WriteLine("PASS: account browser profile was temporary and deleted on dispose.");
+    return;
+}
 
 await using var server = LocalHttpServer.Start();
 using var loggerFactory = LoggerFactory.Create(builder =>

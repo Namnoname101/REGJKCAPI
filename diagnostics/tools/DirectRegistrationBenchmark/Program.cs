@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
 
@@ -15,16 +16,20 @@ var concurrency = args.Length > 2 && int.TryParse(args[2], out var parsedConcurr
 var runBankSetup = args.Length > 3
                    && args[3].Equals("full", StringComparison.OrdinalIgnoreCase);
 var runBotManagerPath = args.Any(arg => arg.Equals("botmanager", StringComparison.OrdinalIgnoreCase));
+var bankName = args
+                   .FirstOrDefault(arg => arg.StartsWith("bank=", StringComparison.OrdinalIgnoreCase))
+                   ?["bank=".Length..]
+               ?? "VIETCOMBANK";
 
 if (runBotManagerPath)
 {
-    await RunBotManagerBenchmarkAsync(site, count, concurrency);
+    await RunBotManagerBenchmarkAsync(site, count, concurrency, bankName);
     return;
 }
 
 if (count == 1)
 {
-    var singleAccount = CreateAccount(1);
+    var singleAccount = CreateAccount(1, bankName);
     var singleStopwatch = Stopwatch.StartNew();
     var singleOutcome = await DirectRegistrationWorkflow.TryRegisterAsync(
         singleAccount,
@@ -39,7 +44,7 @@ if (count == 1)
     Console.WriteLine($"status={singleOutcome.Status}");
     Console.WriteLine($"message={singleOutcome.Message}");
     Console.WriteLine($"usernameConflict={singleOutcome.UsernameConflict}");
-    Console.WriteLine($"raw={Trim(singleOutcome.RawResponse)}");
+    Console.WriteLine($"response={SummarizeResponse(singleOutcome.RawResponse)}");
     if (runBankSetup && singleOutcome.Status == DirectRegistrationStatus.Success)
     {
         var bankStopwatch = Stopwatch.StartNew();
@@ -57,7 +62,7 @@ if (count == 1)
         Console.WriteLine($"bankElapsedMs={bankStopwatch.ElapsedMilliseconds}");
         Console.WriteLine($"bankStatus={bankOutcome.Status}");
         Console.WriteLine($"bankMessage={bankOutcome.Message}");
-        Console.WriteLine($"bankRaw={Trim(bankOutcome.RawResponse)}");
+        Console.WriteLine($"bankResponse={SummarizeResponse(bankOutcome.RawResponse)}");
     }
 
     return;
@@ -71,7 +76,7 @@ var tasks = Enumerable.Range(1, count)
         await gate.WaitAsync();
         try
         {
-            var account = CreateAccount(index);
+            var account = CreateAccount(index, bankName);
             var stopwatch = Stopwatch.StartNew();
             var outcome = await DirectRegistrationWorkflow.TryRegisterAsync(
                 account,
@@ -134,15 +139,15 @@ foreach (var result in results.OrderBy(result => result.Index))
             : $" bankStatus={result.BankOutcome.Status} bankMessage={result.BankOutcome.Message}"));
     if (result.Outcome.Status != DirectRegistrationStatus.Success)
     {
-        Console.WriteLine($"#{result.Index} raw={Trim(result.Outcome.RawResponse)}");
+        Console.WriteLine($"#{result.Index} response={SummarizeResponse(result.Outcome.RawResponse)}");
     }
     else if (result.BankOutcome?.Status != DirectBankSetupStatus.Success)
     {
-        Console.WriteLine($"#{result.Index} bankRaw={Trim(result.BankOutcome?.RawResponse)}");
+        Console.WriteLine($"#{result.Index} bankResponse={SummarizeResponse(result.BankOutcome?.RawResponse)}");
     }
 }
 
-static AccountModel CreateAccount(int index)
+static AccountModel CreateAccount(int index, string bankName)
 {
     return new AccountModel
 {
@@ -152,18 +157,22 @@ static AccountModel CreateAccount(int index)
     FullName = "NGUYEN VAN TEST",
     Level2Password = Random.Shared.Next(100000, 999999).ToString(),
     AccountNumber = $"000{Random.Shared.NextInt64(1_000_000_000, 9_999_999_999)}",
-    BankName = "VIETCOMBANK",
+    BankName = bankName,
     Branch = "HA NOI",
-    Proxy = string.Empty,
+    Proxy = Environment.GetEnvironmentVariable("VIBECODE_PROXY") ?? string.Empty,
     UserAgent = string.Empty
 };
 }
 
-static async Task RunBotManagerBenchmarkAsync(TargetSite site, int count, int concurrency)
+static async Task RunBotManagerBenchmarkAsync(
+    TargetSite site,
+    int count,
+    int concurrency,
+    string bankName)
 {
     var accounts = Enumerable
         .Range(1, count)
-        .Select(CreateAccount)
+        .Select(index => CreateAccount(index, bankName))
         .ToList();
 
     foreach (var account in accounts)
@@ -234,15 +243,32 @@ static bool IsSuccessLineForRun(string line, TargetSite site, ISet<string> usern
            && usernames.Contains(parts[1]);
 }
 
-static string Trim(string? value)
+static string SummarizeResponse(string? value)
 {
     if (string.IsNullOrWhiteSpace(value))
     {
         return string.Empty;
     }
 
-    value = value.ReplaceLineEndings(" ");
-    return value.Length <= 4000 ? value : value[..4000] + "...[trimmed]";
+    try
+    {
+        using var document = JsonDocument.Parse(value);
+        var root = document.RootElement;
+        var summary = new Dictionary<string, object?>();
+        foreach (var name in new[] { "success", "code", "errorCode", "message", "msg" })
+        {
+            if (root.TryGetProperty(name, out var element))
+            {
+                summary[name] = element.Clone();
+            }
+        }
+
+        return JsonSerializer.Serialize(summary);
+    }
+    catch (JsonException)
+    {
+        return $"non-json length={value.Length}";
+    }
 }
 
 internal sealed record BurstResult(

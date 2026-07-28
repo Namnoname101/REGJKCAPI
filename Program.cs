@@ -1,3 +1,4 @@
+using System.Net;
 using BAOCODETOOL.Configuration;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Data;
@@ -12,6 +13,7 @@ using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Telegram.Bot;
+using Telegram.Bot.Types.Enums;
 
 var webRoot = Path.Combine(AppContext.BaseDirectory, "wwwroot");
 if (!Directory.Exists(webRoot) && Directory.Exists(Path.Combine(Directory.GetCurrentDirectory(), "wwwroot")))
@@ -222,6 +224,78 @@ app.MapDelete("/api/proxypackages/{id}", async (AppDbContext db, int id) =>
     return Results.Ok();
 });
 
+app.MapPost("/api/users/balance/{id}", async (AppDbContext db, IUserService userService, ITelegramBotClient bot, int id, UserBalanceUpdateRequest req) =>
+{
+    var user = await db.Users.FindAsync(id);
+    if (user == null) return Results.NotFound();
+
+    decimal oldBalance = user.Balance;
+    bool success = false;
+    string actionText = "";
+
+    if (req.Mode == "set")
+    {
+        success = await userService.SetBalanceAsync(user.ChatId, req.Amount, req.Reason ?? "Admin điều chỉnh từ Web Local", "ADMIN_WEB");
+        actionText = $"được đặt thành <b>{req.Amount:N0} Xu</b>";
+    }
+    else if (req.Mode == "add")
+    {
+        success = await userService.AddBalanceAsync(user.ChatId, req.Amount, req.Reason ?? "Admin cộng thêm từ Web Local", "ADMIN_WEB");
+        actionText = $"được cộng thêm <b>+{req.Amount:N0} Xu</b> (Số dư mới: <b>{(oldBalance + req.Amount):N0} Xu</b>)";
+    }
+    else if (req.Mode == "deduct")
+    {
+        success = await userService.DeductBalanceAsync(user.ChatId, req.Amount, req.Reason ?? "Admin trừ từ Web Local", "ADMIN_WEB");
+        actionText = $"bị trừ <b>-{req.Amount:N0} Xu</b> (Số dư mới: <b>{(oldBalance - req.Amount):N0} Xu</b>)";
+    }
+
+    if (!success) return Results.BadRequest(new { error = "Không thể thực hiện điều chỉnh số dư." });
+
+    if (req.NotifyUser)
+    {
+        try
+        {
+            var msgText = $"💵 <b>THÔNG BÁO TỪ ADMIN:</b>\n" +
+                          $"━━━━━━━━━━━━━━━━━━━━\n" +
+                          $"Số dư tài khoản của bạn vừa {actionText}.\n" +
+                          $"📝 Ghi chú: <b>{WebUtility.HtmlEncode(req.Reason ?? "Điều chỉnh từ BQT")}</b>";
+            await bot.SendMessage(user.ChatId, msgText, ParseMode.Html);
+        }
+        catch { }
+    }
+
+    return Results.Ok(new { success = true, newBalance = user.Balance });
+});
+
+app.MapPost("/api/notifications/broadcast", async (AppDbContext db, ITelegramBotClient bot, BroadcastRequest req) =>
+{
+    if (string.IsNullOrWhiteSpace(req.Message))
+        return Results.BadRequest(new { error = "Nội dung thông báo không được để trống." });
+
+    var chatIds = await db.Users.Select(u => u.ChatId).Distinct().ToListAsync();
+    int successCount = 0;
+    int failCount = 0;
+
+    string formattedMsg = $"<b>Thông báo từ admin:</b>\n\n" +
+                          $"{WebUtility.HtmlEncode(req.Message.Trim())}";
+
+    foreach (var chatId in chatIds)
+    {
+        try
+        {
+            await bot.SendMessage(chatId, formattedMsg, ParseMode.Html);
+            successCount++;
+        }
+        catch
+        {
+            failCount++;
+        }
+        await Task.Delay(50);
+    }
+
+    return Results.Ok(new { successCount, failCount, total = chatIds.Count });
+});
+
 try
 {
     await app.RunAsync();
@@ -231,3 +305,6 @@ catch (OptionsValidationException exception)
     Console.Error.WriteLine($"[CONFIG ERROR] {string.Join(" ", exception.Failures)}");
     Environment.ExitCode = 2;
 }
+
+public record UserBalanceUpdateRequest(string Mode, decimal Amount, string? Reason, bool NotifyUser);
+public record BroadcastRequest(string Message);

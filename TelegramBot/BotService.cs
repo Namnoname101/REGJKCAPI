@@ -32,18 +32,26 @@ namespace BAOCODETOOL.TelegramBot
     {
         public string Step { get; set; } = "idle"; // idle | s_game | s_name | s_phone | s_bank | s_sotk | s_proxy | confirming | bulk | s_bulk_game
         public HashSet<string> SelectedGames { get; set; } = new();
-        public string Game => SelectedGames.Count > 0 ? string.Join(", ", SelectedGames) : "ALL";
         public string FullName { get; set; } = "";
         public string Phone { get; set; } = "";
         public string BankName { get; set; } = "";
         public string SoTk { get; set; } = "";
         public string Proxy { get; set; } = "";
-        // Lưu messageId của tin nhắn hướng dẫn để edit lại
+        // Tin hướng dẫn hiện tại được thay thế ở mỗi bước để cuộc trò chuyện gọn hơn.
         public int GuideMessageId { get; set; } = 0;
     }
 
     public class BotService
     {
+        private static readonly string[] RegistrationGames =
+        {
+            "RR88",
+            "MM88",
+            "XX88",
+            "LLWIN",
+            "GG88"
+        };
+
         private readonly ITelegramBotClient _botClient;
         private readonly IJobQueueService _jobQueue;
         private readonly IResultSenderService _resultSender;
@@ -196,6 +204,8 @@ namespace BAOCODETOOL.TelegramBot
         private static InlineKeyboardMarkup BuildGameSelectionKeyboard(HashSet<string> selectedGames, bool isBulk)
         {
             string pfx = isBulk ? "bgame_" : "game_";
+            bool allSelected = RegistrationGames.All(selectedGames.Contains);
+            string textAll = allSelected ? "✅ Tất cả" : "☑️ Chọn tất cả";
             string textRR88 = selectedGames.Contains("RR88") ? "✅ RR88" : "RR88";
             string textMM88 = selectedGames.Contains("MM88") ? "✅ MM88" : "MM88";
             string textXX88 = selectedGames.Contains("XX88") ? "✅ XX88" : "XX88";
@@ -205,6 +215,7 @@ namespace BAOCODETOOL.TelegramBot
 
             return new InlineKeyboardMarkup(new[]
             {
+                new[] { InlineKeyboardButton.WithCallbackData(textAll, $"toggle_{pfx}ALL") },
                 new[] { InlineKeyboardButton.WithCallbackData(textRR88, $"toggle_{pfx}RR88"), InlineKeyboardButton.WithCallbackData(textMM88, $"toggle_{pfx}MM88"), InlineKeyboardButton.WithCallbackData(textXX88, $"toggle_{pfx}XX88") },
                 new[] { InlineKeyboardButton.WithCallbackData(textLLWIN, $"toggle_{pfx}LLWIN"), InlineKeyboardButton.WithCallbackData(textGG88, $"toggle_{pfx}GG88") },
                 new[] { InlineKeyboardButton.WithCallbackData("➡️ Tiếp tục", $"done_{pfx}") },
@@ -212,8 +223,89 @@ namespace BAOCODETOOL.TelegramBot
             });
         }
 
+        private static string FormatSelectedGames(IReadOnlySet<string> selectedGames) =>
+            RegistrationGames.All(selectedGames.Contains)
+                ? "Tất cả"
+                : string.Join(", ", RegistrationGames.Where(selectedGames.Contains));
+
         private UserSession GetSession(long chatId) =>
             _sessions.GetOrAdd(chatId, _ => new UserSession());
+
+        private async Task DeleteMessageSafelyAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            int messageId,
+            CancellationToken ct)
+        {
+            if (messageId <= 0)
+                return;
+
+            try
+            {
+                await bot.DeleteMessage(chatId, messageId, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (ApiRequestException exception)
+            {
+                // Message cleanup is best-effort (Telegram may reject old/already deleted messages).
+                _logger.LogDebug(
+                    exception,
+                    "Could not clean up Telegram message. ChatId={ChatId}, MessageId={MessageId}",
+                    chatId,
+                    messageId);
+            }
+        }
+
+        private async Task<Message> SendReplacingMessageAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            int previousMessageId,
+            string text,
+            ParseMode parseMode,
+            InlineKeyboardMarkup? replyMarkup,
+            CancellationToken ct,
+            int userMessageId = 0)
+        {
+            var sent = await bot.SendMessage(
+                chatId,
+                text,
+                parseMode,
+                replyMarkup: replyMarkup,
+                cancellationToken: ct);
+
+            await DeleteMessageSafelyAsync(bot, chatId, previousMessageId, ct);
+            if (userMessageId != previousMessageId)
+                await DeleteMessageSafelyAsync(bot, chatId, userMessageId, ct);
+
+            return sent;
+        }
+
+        private async Task<Message> ReplaceSessionPromptAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            UserSession session,
+            string text,
+            ParseMode parseMode,
+            InlineKeyboardMarkup? replyMarkup,
+            CancellationToken ct,
+            int userMessageId = 0)
+        {
+            var sent = await SendReplacingMessageAsync(
+                bot,
+                chatId,
+                session.GuideMessageId,
+                text,
+                parseMode,
+                replyMarkup,
+                ct,
+                userMessageId);
+
+            session.GuideMessageId = sent.MessageId;
+            return sent;
+        }
 
         private static void ApplySelectedSites(AccountModel account, IReadOnlySet<string> selectedGames)
         {
@@ -559,8 +651,19 @@ namespace BAOCODETOOL.TelegramBot
                     {
                         bool isBulk = cb.Data.StartsWith("toggle_bgame_");
                         string game = cb.Data.Substring(cb.Data.LastIndexOf('_') + 1);
-                        if (sess.SelectedGames.Contains(game)) sess.SelectedGames.Remove(game);
-                        else sess.SelectedGames.Add(game);
+                        if (game == "ALL")
+                        {
+                            bool allSelected = RegistrationGames.All(sess.SelectedGames.Contains);
+                            if (allSelected)
+                                sess.SelectedGames.Clear();
+                            else
+                                sess.SelectedGames.UnionWith(RegistrationGames);
+                        }
+                        else if (RegistrationGames.Contains(game))
+                        {
+                            if (sess.SelectedGames.Contains(game)) sess.SelectedGames.Remove(game);
+                            else sess.SelectedGames.Add(game);
+                        }
 
                         await bot.EditMessageReplyMarkup(cbChat, cb.Message!.MessageId, replyMarkup: BuildGameSelectionKeyboard(sess.SelectedGames, isBulk), cancellationToken: ct);
                     }
@@ -579,7 +682,7 @@ namespace BAOCODETOOL.TelegramBot
                         }
 
                         bool isBulk = cb.Data == "done_bgame_";
-                        string gameStr = sess.Game;
+                        string gameStr = FormatSelectedGames(sess.SelectedGames);
 
                         if (isBulk)
                         {
@@ -692,9 +795,18 @@ namespace BAOCODETOOL.TelegramBot
                 switch (cb.Data)
                 {
                     case "cancel":
-                        _sessions.TryRemove(cbChat, out _);
-                        await bot.SendMessage(cbChat, MainMenuText(), ParseMode.Html,
-                            replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                        _sessions.TryRemove(cbChat, out var cancelledSession);
+                        var messageToDelete = cb.Message?.MessageId
+                            ?? cancelledSession?.GuideMessageId
+                            ?? 0;
+                        await SendReplacingMessageAsync(
+                            bot,
+                            cbChat,
+                            messageToDelete,
+                            MainMenuText(),
+                            ParseMode.Html,
+                            MainMenuKeyboard(),
+                            ct);
                         break;
 
                     case "start_add":
@@ -703,17 +815,17 @@ namespace BAOCODETOOL.TelegramBot
                         await bot.AnswerCallbackQuery(cb.Id, "⏳ Hệ thống đang chạy! Vui lòng đợi hoàn thành trước.", showAlert: true, cancellationToken: ct);
                         return;
                     }
-                    await StartAddFlow(bot, cbChat, ct);
+                    await StartAddFlow(bot, cbChat, ct, cb.Message?.MessageId ?? 0);
                     break;
 
                     case "status":
                         var queueStatus = _jobQueue.GetSnapshot();
-                        await bot.SendMessage(cbChat,
+                        await SendReplacingMessageAsync(bot, cbChat, cb.Message?.MessageId ?? 0,
                             $"📊 <b>Trạng thái hệ thống</b>\n━━━━━━━━━━━━━━━━━━━━\n" +
                             $"🔄 Đang chạy: <b>{queueStatus.Processing}/{_maxConcurrentJobs}</b> slot\n" +
                             $"⏳ Đang chờ: <b>{queueStatus.Pending}</b>\n" +
                             $"✅ Slot còn trống: <b>{Math.Max(0, _maxConcurrentJobs - queueStatus.Processing)}/{_maxConcurrentJobs}</b>",
-                            ParseMode.Html, replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                            ParseMode.Html, MainMenuKeyboard(), ct);
                         break;
 
                     case "confirm_submit":
@@ -727,14 +839,18 @@ namespace BAOCODETOOL.TelegramBot
                         await bot.AnswerCallbackQuery(cb.Id, "⏳ Hệ thống đang chạy! Vui lòng đợi hoàn thành trước.", showAlert: true, cancellationToken: ct);
                         return;
                     }
-                    var bulkSess = new UserSession { Step = "s_bulk_game" };
+                    var bulkSess = new UserSession
+                    {
+                        Step = "s_bulk_game",
+                        GuideMessageId = cb.Message?.MessageId ?? 0
+                    };
                     _sessions[cbChat] = bulkSess;
-                    await bot.SendMessage(cbChat,
+                    await ReplaceSessionPromptAsync(bot, cbChat, bulkSess,
                         "📋 <b>NHẬP HÀNG LOẠT</b>\n" +
                         "━━━━━━━━━━━━━━━━━━━━\n" +
                         "Chọn <b>Nhà cái</b> để đăng ký hàng loạt:",
-                        ParseMode.Html, 
-                        replyMarkup: BuildGameSelectionKeyboard(bulkSess.SelectedGames, true), cancellationToken: ct);
+                        ParseMode.Html,
+                        BuildGameSelectionKeyboard(bulkSess.SelectedGames, true), ct);
                     break;
 
                 case "account_balance":
@@ -742,13 +858,13 @@ namespace BAOCODETOOL.TelegramBot
                     {
                         var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
                         var user = await userService.GetUserByChatIdAsync(cbChat, cb.From?.Username, ct);
-                        await bot.SendMessage(cbChat,
+                        await SendReplacingMessageAsync(bot, cbChat, cb.Message?.MessageId ?? 0,
                             $"👤 <b>THÔNG TIN TÀI KHOẢN</b>\n━━━━━━━━━━━━━━━━━━━━\n" +
                             $"🆔 Chat ID: <code>{cbChat}</code>\n" +
                             $"👤 Username: {(string.IsNullOrEmpty(user.Username) ? "Không có" : "@" + user.Username)}\n" +
                             $"💰 Số dư hiện tại: <b>{user.Balance:N0} Xu</b>\n" +
                             $"💸 Tổng đã chi: <b>{user.TotalSpent:N0} Xu</b>",
-                            ParseMode.Html, replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                            ParseMode.Html, MainMenuKeyboard(), ct);
                     }
                     break;
 
@@ -757,7 +873,7 @@ namespace BAOCODETOOL.TelegramBot
                     break;
 
                 case "deposit":
-                    await bot.SendMessage(cbChat,
+                    await SendReplacingMessageAsync(bot, cbChat, cb.Message?.MessageId ?? 0,
                         $"💰 <b>HƯỚNG DẪN NẠP TIỀN / MUA XU</b>\n" +
                         $"━━━━━━━━━━━━━━━━━━━━\n\n" +
                         $"Vui lòng chuyển khoản tới thông tin ngân hàng bên dưới:\n\n" +
@@ -766,12 +882,12 @@ namespace BAOCODETOOL.TelegramBot
                         $"👤 Chủ tài khoản: <b>NGUYEN VAN A</b>\n" +
                         $"📝 Nội dung chuyển khoản: <code>NAP {cbChat}</code>\n\n" +
                         $"💡 <b>QUAN TRỌNG:</b> Sau khi chuyển khoản thành công, hãy gửi <b>ẢNH CHỤP MÀN HÌNH (Biên lai)</b> trực tiếp vào chat này để Admin phê duyệt tự động.",
-                        ParseMode.Html, replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                        ParseMode.Html, MainMenuKeyboard(), ct);
                     break;
 
                 case "edit_restart":
                     _sessions.TryRemove(cbChat, out _);
-                    await StartAddFlow(bot, cbChat, ct);
+                    await StartAddFlow(bot, cbChat, ct, cb.Message?.MessageId ?? 0);
                     break;
                 }
                 return;
@@ -859,30 +975,41 @@ namespace BAOCODETOOL.TelegramBot
             // /start hoặc /menu
             if (text.StartsWith("/start") || text == "/menu")
             {
-                _sessions.TryRemove(chatId, out _);
-                await bot.SendMessage(chatId, MainMenuText(), ParseMode.Html,
-                    replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                _sessions.TryRemove(chatId, out var previousSession);
+                await SendReplacingMessageAsync(
+                    bot,
+                    chatId,
+                    previousSession?.GuideMessageId ?? 0,
+                    MainMenuText(),
+                    ParseMode.Html,
+                    MainMenuKeyboard(),
+                    ct,
+                    msg.MessageId);
                 return;
             }
 
             // /add shortcut
             if (text.StartsWith("/add"))
             {
-                await StartAddFlow(bot, chatId, ct);
+                await StartAddFlow(bot, chatId, ct, msg.MessageId);
                 return;
             }
 
             // /bulk shortcut
             if (text.StartsWith("/bulk"))
             {
-                var sess = new UserSession { Step = "s_bulk_game" };
+                var sess = new UserSession
+                {
+                    Step = "s_bulk_game",
+                    GuideMessageId = msg.MessageId
+                };
                 _sessions[chatId] = sess;
-                await bot.SendMessage(chatId,
+                await ReplaceSessionPromptAsync(bot, chatId, sess,
                     "📋 <b>NHẬP HÀNG LOẠT</b>\n" +
                     "━━━━━━━━━━━━━━━━━━━━\n" +
                     "Chọn <b>Nhà cái</b> để đăng ký hàng loạt:",
-                    ParseMode.Html, 
-                    replyMarkup: BuildGameSelectionKeyboard(sess.SelectedGames, true), cancellationToken: ct);
+                    ParseMode.Html,
+                    BuildGameSelectionKeyboard(sess.SelectedGames, true), ct);
                 return;
             }
 
@@ -956,32 +1083,44 @@ namespace BAOCODETOOL.TelegramBot
             // Bulk mode: xử lý nhiều dòng
             if (session.Step == "bulk")
             {
-                await HandleBulkInput(bot, chatId, text, ct);
+                await HandleBulkInput(bot, chatId, msg.MessageId, text, ct);
                 return;
             }
 
-            await HandleStepInput(bot, chatId, text, session, ct);
+            await HandleStepInput(bot, chatId, msg.MessageId, text, session, ct);
         }
 
         // ══════════════════════════════════════════════════════════════════════
         // Bắt đầu flow nhập từng bước
-        private async Task StartAddFlow(ITelegramBotClient bot, long chatId, CancellationToken ct)
+        private async Task StartAddFlow(
+            ITelegramBotClient bot,
+            long chatId,
+            CancellationToken ct,
+            int messageIdToReplace = 0)
         {
-            var sess = new UserSession { Step = "s_game" };
+            var sess = new UserSession
+            {
+                Step = "s_game",
+                GuideMessageId = messageIdToReplace
+            };
             _sessions[chatId] = sess;
 
-            var sent = await bot.SendMessage(chatId,
+            await ReplaceSessionPromptAsync(bot, chatId, sess,
                 "📝 <b>THÊM TÀI KHOẢN MỚI</b>\n" +
                 "━━━━━━━━━━━━━━━━━━━━\n\n" +
                 "Bước <b>1/6</b> — Chọn <b>Nhà cái</b> để đăng ký:",
-                ParseMode.Html, 
-                replyMarkup: BuildGameSelectionKeyboard(sess.SelectedGames, false), cancellationToken: ct);
-
-            sess.GuideMessageId = sent.MessageId;
+                ParseMode.Html,
+                BuildGameSelectionKeyboard(sess.SelectedGames, false), ct);
         }
 
         // ══════════════════════════════════════════════════════════════════════
-        private async Task HandleStepInput(ITelegramBotClient bot, long chatId, string text, UserSession sess, CancellationToken ct)
+        private async Task HandleStepInput(
+            ITelegramBotClient bot,
+            long chatId,
+            int userMessageId,
+            string text,
+            UserSession sess,
+            CancellationToken ct)
         {
             if (sess.Step == "idle")
             {
@@ -994,74 +1133,79 @@ namespace BAOCODETOOL.TelegramBot
             {
                 case "s_game":
                 case "s_bulk_game":
-                    await bot.SendMessage(chatId, "Vui lòng chọn Nhà cái bằng cách nhấn vào các nút ở trên.", cancellationToken: ct);
+                    await ReplaceSessionPromptAsync(bot, chatId, sess,
+                        "Vui lòng chọn Nhà cái bằng cách nhấn vào các nút bên dưới.",
+                        ParseMode.None,
+                        BuildGameSelectionKeyboard(sess.SelectedGames, sess.Step == "s_bulk_game"),
+                        ct,
+                        userMessageId);
                     return;
 
                 case "s_name":
                     if (text.Length < 3 || text.Any(char.IsDigit))
                     {
-                        await SendError(bot, chatId, "Họ tên phải có ít nhất 3 ký tự và không chứa số.\n<i>VD: Nguyen Van A</i>", ct);
+                        await SendError(bot, chatId, sess, userMessageId, "Họ tên phải có ít nhất 3 ký tự và không chứa số.\n<i>VD: Nguyen Van A</i>", ct);
                         return;
                     }
                     sess.FullName = text;
                     sess.Step = "s_phone";
-                    await bot.SendMessage(chatId,
+                    await ReplaceSessionPromptAsync(bot, chatId, sess,
                         "Bước <b>3/6</b> — Nhập <b>Số điện thoại</b>:\n\n" +
                         "<i>Yêu cầu: đúng 10 chữ số, bắt đầu bằng 0\nVD: 0987654321</i>",
-                        ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                        ParseMode.Html, CancelKeyboard(), ct, userMessageId);
                     break;
 
                 case "s_phone":
                     var phone = text.Replace(" ", "");
                     if (!Regex.IsMatch(phone, @"^0\d{9}$"))
                     {
-                        await SendError(bot, chatId, "Số điện thoại không hợp lệ!\n<b>Yêu cầu:</b> Đúng 10 chữ số, bắt đầu bằng 0.\n<i>VD: 0987654321</i>", ct);
+                        await SendError(bot, chatId, sess, userMessageId, "Số điện thoại không hợp lệ!\n<b>Yêu cầu:</b> Đúng 10 chữ số, bắt đầu bằng 0.\n<i>VD: 0987654321</i>", ct);
                         return;
                     }
                     sess.Phone = phone;
                     sess.Step = "s_bank";
-                    await bot.SendMessage(chatId,
+                    await ReplaceSessionPromptAsync(bot, chatId, sess,
                         "Bước <b>4/6</b> — Nhập <b>Tên ngân hàng</b>:\n\n" +
                         "<i>VD: Vietcombank, Techcombank, MBBank, ACB, BIDV...</i>",
-                        ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                        ParseMode.Html, CancelKeyboard(), ct, userMessageId);
                     break;
 
                 case "s_bank":
                     if (text.Length < 2)
                     {
-                        await SendError(bot, chatId, "Tên ngân hàng quá ngắn. Hãy nhập đầy đủ.\n<i>VD: Vietcombank</i>", ct);
+                        await SendError(bot, chatId, sess, userMessageId, "Tên ngân hàng quá ngắn. Hãy nhập đầy đủ.\n<i>VD: Vietcombank</i>", ct);
                         return;
                     }
                     sess.BankName = text;
                     sess.Step = "s_sotk";
-                    await bot.SendMessage(chatId,
+                    await ReplaceSessionPromptAsync(bot, chatId, sess,
                         "Bước <b>5/6</b> — Nhập <b>Số tài khoản ngân hàng</b>:\n\n" +
                         "<i>Yêu cầu: chỉ gồm số, độ dài 6-20 ký tự\nVD: 1234567890</i>",
-                        ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                        ParseMode.Html, CancelKeyboard(), ct, userMessageId);
                     break;
 
                 case "s_sotk":
                     var sotk = text.Replace(" ", "");
                     if (!Regex.IsMatch(sotk, @"^\d{6,20}$"))
                     {
-                        await SendError(bot, chatId, "Số tài khoản không hợp lệ!\n<b>Yêu cầu:</b> Chỉ gồm chữ số, dài 6–20 ký tự.\n<i>VD: 1234567890</i>", ct);
+                        await SendError(bot, chatId, sess, userMessageId, "Số tài khoản không hợp lệ!\n<b>Yêu cầu:</b> Chỉ gồm chữ số, dài 6–20 ký tự.\n<i>VD: 1234567890</i>", ct);
                         return;
                     }
                     sess.SoTk = sotk;
 
                     sess.Step = "s_proxy";
-                    await bot.SendMessage(chatId,
+                    await ReplaceSessionPromptAsync(bot, chatId, sess,
                         "Bước <b>6/6</b> — Nhập <b>Proxy</b>:\n\n" +
                         "📌 <b>Định dạng:</b>\n" +
                         "<code>ip:port</code>  hoặc  <code>ip:port:user:pass</code>\n\n" +
                         "<i>VD: 123.45.67.89:8080:username:password</i>",
-                        ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                        ParseMode.Html, CancelKeyboard(), ct, userMessageId);
                     break;
 
                 case "s_proxy":
                     if (!TryNormalizeRequiredProxyInput(text, out var proxy, out var proxyError))
                     {
-                        await SendError(bot, chatId,
+                        await SendError(bot, chatId, sess, userMessageId,
                             $"{WebUtility.HtmlEncode(proxyError)}\n\n" +
                             "<code>ip:port</code> or <code>ip:port:user:pass</code>\n" +
                             "<i>VD: 123.45.67.89:8080:user:pass</i>", ct);
@@ -1070,33 +1214,42 @@ namespace BAOCODETOOL.TelegramBot
 
                     sess.Proxy = proxy;
                     sess.Step = "confirming";
-                    await SendConfirmationAsync(bot, chatId, sess, ct);
+                    await SendConfirmationAsync(bot, chatId, sess, ct, userMessageId);
                     break;
             }
         }
 
-        private static async Task SendError(ITelegramBotClient bot, long chatId, string msg, CancellationToken ct)
-        {
-            await bot.SendMessage(chatId,
-                $"⚠️ <b>Thông tin chưa đúng</b>\n\n{msg}\n\n🔄 Vui lòng nhập lại:",
-                ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
-        }
-
-        private static async Task SendConfirmationAsync(
+        private Task SendError(
             ITelegramBotClient bot,
             long chatId,
             UserSession session,
-            CancellationToken cancellationToken)
+            int userMessageId,
+            string msg,
+            CancellationToken ct)
+        {
+            return ReplaceSessionPromptAsync(bot, chatId, session,
+                $"⚠️ <b>Thông tin chưa đúng</b>\n\n{msg}\n\n🔄 Vui lòng nhập lại:",
+                ParseMode.Html, CancelKeyboard(), ct, userMessageId);
+        }
+
+        private async Task SendConfirmationAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            UserSession session,
+            CancellationToken cancellationToken,
+            int userMessageId = 0)
         {
             var proxyText = string.IsNullOrWhiteSpace(session.Proxy)
                 ? "Không dùng proxy (kết nối trực tiếp)"
                 : session.Proxy;
 
-            await bot.SendMessage(
+            await ReplaceSessionPromptAsync(
+                bot,
                 chatId,
+                session,
                 "📋 <b>XÁC NHẬN THÔNG TIN</b>\n" +
                 "━━━━━━━━━━━━━━━━━━━━\n" +
-                $"🎮 Nhà cái:  <b>{WebUtility.HtmlEncode(session.Game)}</b>\n" +
+                $"🎮 Nhà cái:  <b>{WebUtility.HtmlEncode(FormatSelectedGames(session.SelectedGames))}</b>\n" +
                 $"👤 Họ tên:    <b>{WebUtility.HtmlEncode(session.FullName)}</b>\n" +
                 $"📞 SĐT:       <b>{WebUtility.HtmlEncode(session.Phone)}</b>\n" +
                 $"🏦 Ngân hàng: <b>{WebUtility.HtmlEncode(session.BankName)}</b>\n" +
@@ -1105,7 +1258,7 @@ namespace BAOCODETOOL.TelegramBot
                 "━━━━━━━━━━━━━━━━━━━━\n" +
                 "Thông tin đúng chưa? Nhấn <b>Xác nhận</b> để chạy.",
                 ParseMode.Html,
-                replyMarkup: new InlineKeyboardMarkup(new[]
+                new InlineKeyboardMarkup(new[]
                 {
                     new[]
                     {
@@ -1113,7 +1266,8 @@ namespace BAOCODETOOL.TelegramBot
                         InlineKeyboardButton.WithCallbackData("🔄 Nhập lại", "edit_restart")
                     }
                 }),
-                cancellationToken: cancellationToken);
+                cancellationToken,
+                userMessageId);
         }
 
         // ══════════════════════════════════════════════════════════════════════
@@ -1129,6 +1283,8 @@ namespace BAOCODETOOL.TelegramBot
                 await SendError(
                     bot,
                     chatId,
+                    sess,
+                    0,
                     $"{WebUtility.HtmlEncode(proxyError)}\n\n" +
                     "Tài khoản chưa được đưa vào hàng đợi. Hãy nhập proxy HTTP/HTTPS hợp lệ.",
                     ct);
@@ -1165,6 +1321,10 @@ namespace BAOCODETOOL.TelegramBot
                 batchId: Guid.NewGuid(),
                 ct);
 
+            // The progress message now carries the request state; the confirmation is no longer needed.
+            await DeleteMessageSafelyAsync(bot, chatId, sess.GuideMessageId, ct);
+            sess.GuideMessageId = 0;
+
             _profileRepository.Add(account);
 
             var queueStatus = _jobQueue.GetSnapshot();
@@ -1199,23 +1359,33 @@ namespace BAOCODETOOL.TelegramBot
 
         // ══════════════════════════════════════════════════════════════════════
         // Xử lý bulk: nhiều tài khoản cùng lúc
-        private async Task HandleBulkInput(ITelegramBotClient bot, long chatId, string text, CancellationToken ct)
+        private async Task HandleBulkInput(
+            ITelegramBotClient bot,
+            long chatId,
+            int userMessageId,
+            string text,
+            CancellationToken ct)
         {
-            _sessions.TryRemove(chatId, out var sess);
-            var selectedGames = sess?.SelectedGames ?? new HashSet<string>();
+            if (!_sessions.TryGetValue(chatId, out var sess) || sess.Step != "bulk")
+            {
+                await bot.SendMessage(chatId,
+                    "⚠️ Phiên nhập hàng loạt không còn hiệu lực. Vui lòng bắt đầu lại từ menu.",
+                    replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                return;
+            }
 
             var lines = text.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-                            .Where(l => l.Contains('|'))
                             .ToList();
 
             if (lines.Count == 0)
             {
                 const string format = "HOTEN|TENNGANHANG|SDT|SOTK|PROXY";
 
-                await bot.SendMessage(chatId,
+                await ReplaceSessionPromptAsync(bot, chatId, sess,
                     "⚠️ Không tìm thấy dòng nào đúng định dạng.\n\n" +
-                    $"Mỗi dòng phải theo mẫu:\n<code>{format}</code>",
-                    ParseMode.Html, replyMarkup: CancelKeyboard(), cancellationToken: ct);
+                    $"Mỗi dòng phải theo mẫu:\n<code>{format}</code>\n\n" +
+                    "🔄 Yêu cầu vẫn được giữ. Vui lòng nhập lại:",
+                    ParseMode.Html, CancelKeyboard(), ct, userMessageId);
                 return;
             }
 
@@ -1276,33 +1446,35 @@ namespace BAOCODETOOL.TelegramBot
                 validAccounts.Add(account);
             }
 
-            // Báo lỗi nếu có dòng không hợp lệ
+            // Không nhận một phần danh sách vì người dùng có thể bỏ sót các dòng lỗi.
+            // Giữ nguyên phiên và lựa chọn game để họ sửa rồi gửi lại toàn bộ dữ liệu.
             if (errors.Length > 0)
             {
-                await bot.SendMessage(chatId,
-                    $"⚠️ <b>Một số dòng bị lỗi và đã bị bỏ qua:</b>\n{WebUtility.HtmlEncode(errors.ToString())}",
-                    ParseMode.Html, cancellationToken: ct);
-            }
+                var errorDetails = errors.Length <= 3000
+                    ? errors.ToString()
+                    : errors.ToString(0, 3000) + "\n… và thêm lỗi khác.";
 
-            if (validAccounts.Count == 0)
-            {
-                await bot.SendMessage(chatId,
-                    "❌ Không có tài khoản hợp lệ nào để chạy. Vui lòng kiểm tra lại định dạng.",
-                    ParseMode.Html, replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                await ReplaceSessionPromptAsync(bot, chatId, sess,
+                    $"⚠️ <b>Dữ liệu chưa hợp lệ:</b>\n{WebUtility.HtmlEncode(errorDetails)}\n" +
+                    "Chưa có tài khoản nào được đưa vào hàng đợi.\n\n" +
+                    "🔄 Yêu cầu và các game đã chọn vẫn được giữ. Vui lòng sửa rồi gửi lại toàn bộ danh sách:",
+                    ParseMode.Html, CancelKeyboard(), ct, userMessageId);
                 return;
             }
 
             // Báo trước số lượng
-            await bot.SendMessage(chatId,
+            await ReplaceSessionPromptAsync(bot, chatId, sess,
                 $"🚀 <b>Đã tiếp nhận {validAccounts.Count} tài khoản hợp lệ.</b>\n" +
                 $"Các tài khoản sẽ được chạy tuần tự (tối đa {_maxConcurrentJobs} cùng lúc).",
-                ParseMode.Html, cancellationToken: ct);
+                ParseMode.Html, null, ct, userMessageId);
+
+            _sessions.TryRemove(chatId, out _);
 
             var batchId = Guid.NewGuid();
 
             foreach (var preparedAccount in validAccounts)
             {
-                ApplySelectedSites(preparedAccount, selectedGames);
+                ApplySelectedSites(preparedAccount, sess.SelectedGames);
             }
 
             // Chuẩn bị và đưa từng tài khoản vào queue nền.

@@ -1,7 +1,9 @@
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using System;
+using System.Collections.Generic;
 using System.IO;
+using System.Threading;
 using BAOCODETOOL.Models;
 
 namespace BAOCODETOOL.Core;
@@ -10,21 +12,7 @@ public static class DriverFactory
 {
     public static IWebDriver CreateDriver(AccountModel account)
     {
-        TargetSite? siteToOpen = null;
-
-        foreach (TargetSite site in Enum.GetValues<TargetSite>())
-        {
-            var path = account.GetProfileFolderPath(site);
-            if (Directory.Exists(path) && Directory.GetFileSystemEntries(path).Length > 0)
-            {
-                siteToOpen = site;
-                break;
-            }
-        }
-
-        siteToOpen ??= TargetSite.RR88;
-
-        return CreateDriver(account, siteToOpen);
+        return CreateDriver(account, TargetSite.RR88);
     }
 
     public static IWebDriver CreateDriver(
@@ -34,16 +22,19 @@ public static class DriverFactory
     {
         ArgumentNullException.ThrowIfNull(account);
 
-        var profileFolderPath = site.HasValue
-            ? account.GetProfileFolderPath(site.Value)
-            : account.ProfileFolderPath;
+        var profileFolderPath = Path.Combine(
+            Path.GetTempPath(),
+            "BAOCODETOOL",
+            "BrowserProfiles",
+            Guid.NewGuid().ToString("N"));
 
         return CreateDriver(
             profileFolderPath,
             account.UserAgent,
             account.Proxy,
             headless,
-            site);
+            site,
+            deleteProfileOnDispose: true);
     }
 
     public static IWebDriver CreateDriver(
@@ -51,7 +42,9 @@ public static class DriverFactory
         string? userAgent,
         string? proxy,
         bool headless = false,
-        TargetSite? site = null)
+        TargetSite? site = null,
+        bool verifyProxy = true,
+        bool deleteProfileOnDispose = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profileFolderPath);
         Directory.CreateDirectory(profileFolderPath);
@@ -70,20 +63,40 @@ public static class DriverFactory
         service.HideCommandPromptWindow = true;
         service.SuppressInitialDiagnosticInformation = true;
 
-        IDisposable? cleanupResource = null;
+        var cleanupResources = new List<IDisposable>();
+        if (deleteProfileOnDispose)
+        {
+            cleanupResources.Add(new TemporaryProfileCleanup(profileFolderPath));
+        }
 
         if (proxyConfiguration != null && proxyConfiguration.RequiresAuthentication)
         {
             var relay = new LocalAuthenticatedProxyRelay(proxyConfiguration);
             options.AddArgument($"--proxy-server={relay.LocalProxyServer}");
-            cleanupResource = relay;
+            cleanupResources.Add(relay);
         }
         else if (proxyConfiguration != null)
         {
             options.AddArgument($"--proxy-server={proxyConfiguration.ProxyServerArgument}");
         }
 
-        var driver = new ManagedChromeDriver(service, options, cleanupResource: cleanupResource);
+        var cleanupResource = cleanupResources.Count switch
+        {
+            0 => null,
+            1 => cleanupResources[0],
+            _ => new CleanupBundle(cleanupResources)
+        };
+
+        ManagedChromeDriver driver;
+        try
+        {
+            driver = new ManagedChromeDriver(service, options, cleanupResource);
+        }
+        catch
+        {
+            cleanupResource?.Dispose();
+            throw;
+        }
         
         try
         {
@@ -99,7 +112,7 @@ public static class DriverFactory
 
             // Chặn tải các tài nguyên nặng bằng CDP để cực kỳ nhẹ và chống đơ
             var emptyDict = new System.Collections.Generic.Dictionary<string, object>();
-            var blockedUrls = site is TargetSite.LLWIN or TargetSite.GG88
+            var blockedUrls = site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88
                 ? new[]
                 {
                     "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
@@ -122,7 +135,7 @@ public static class DriverFactory
             driver.ExecuteCdpCommand("Network.enable", emptyDict);
             driver.ExecuteCdpCommand("Network.setBlockedURLs", blockedDict);
 
-            if (site is TargetSite.LLWIN or TargetSite.GG88)
+            if (site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88)
             {
                 driver.ExecuteCdpCommand(
                     "Emulation.setDeviceMetricsOverride",
@@ -162,7 +175,10 @@ public static class DriverFactory
                     });
             }
 
-            ProxyVerifier.VerifyIfNeeded(driver, proxyConfiguration);
+            if (verifyProxy)
+            {
+                ProxyVerifier.VerifyIfNeeded(driver, proxyConfiguration);
+            }
             return driver;
         }
         catch
@@ -178,7 +194,7 @@ public static class DriverFactory
         bool headless,
         TargetSite? site)
     {
-        var useMobileLobby = site is TargetSite.LLWIN or TargetSite.GG88;
+        var useMobileSite = site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88;
         var options = new ChromeOptions
         {
             // Registration strategies already wait for their own form/toast
@@ -189,13 +205,13 @@ public static class DriverFactory
         };
         
         // Tắt chế độ tàng hình theo yêu cầu của user, hiện cửa sổ nhỏ
-        options.AddArgument(useMobileLobby
+        options.AddArgument(useMobileSite
             ? "--window-size=390,844"
             : "--window-size=800,600");
 
-        // These lobbies use an interactive GeeTest image challenge. Keep their
-        // small mobile window visible even when global headless is enabled.
-        if (headless && (!useMobileLobby || site == TargetSite.GG88))
+        // LLWIN still needs a visible interactive image challenge. GG88 and
+        // XX88 can acquire their short-lived risk token in mobile headless.
+        if (headless && site != TargetSite.LLWIN)
         {
             options.AddArgument("--headless=new");
         }
@@ -217,7 +233,7 @@ public static class DriverFactory
         options.AddArgument("--wm-window-animations-disabled");
         options.AddArgument("--disable-ipc-flooding-protection");
         options.AddArgument("--disable-backgrounding-occluded-windows=false");
-        if (!useMobileLobby)
+        if (!useMobileSite)
         {
             options.AddArgument("--blink-settings=imagesEnabled=false");
         }
@@ -255,7 +271,7 @@ public static class DriverFactory
         options.AddArgument("--media-cache-size=1");
         
         // Tắt tính năng bằng Preference
-        if (!useMobileLobby)
+        if (!useMobileSite)
         {
             options.AddUserProfilePreference("profile.default_content_setting_values.images", 2);
             options.AddUserProfilePreference("profile.managed_default_content_settings.images", 2);
@@ -265,7 +281,7 @@ public static class DriverFactory
         options.AddUserProfilePreference("profile.default_content_setting_values.media_stream_mic", 2);
         options.AddUserProfilePreference("profile.default_content_setting_values.media_stream_camera", 2);
 
-        if (useMobileLobby)
+        if (useMobileSite)
         {
             options.AddArgument(
                 "--user-agent=Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) " +
@@ -278,5 +294,73 @@ public static class DriverFactory
         }
 
         return options;
+    }
+
+    private sealed class CleanupBundle(IReadOnlyList<IDisposable> resources) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            for (var index = resources.Count - 1; index >= 0; index--)
+            {
+                try
+                {
+                    resources[index].Dispose();
+                }
+                catch
+                {
+                }
+            }
+        }
+    }
+
+    private sealed class TemporaryProfileCleanup(string profilePath) : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) != 0)
+            {
+                return;
+            }
+
+            var consecutiveMissingChecks = 0;
+            for (var attempt = 0; attempt < 20; attempt++)
+            {
+                try
+                {
+                    if (Directory.Exists(profilePath))
+                    {
+                        Directory.Delete(profilePath, recursive: true);
+                        consecutiveMissingChecks = 0;
+                    }
+                    else if (++consecutiveMissingChecks >= 3)
+                    {
+                        return;
+                    }
+                }
+                catch (IOException)
+                {
+                    consecutiveMissingChecks = 0;
+                }
+                catch (UnauthorizedAccessException)
+                {
+                    consecutiveMissingChecks = 0;
+                }
+                catch
+                {
+                    return;
+                }
+
+                Thread.Sleep(100);
+            }
+        }
     }
 }

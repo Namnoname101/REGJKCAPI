@@ -4,6 +4,9 @@ const sdkVersion = process.argv[4] || "1";
 const siteOrigin = process.argv[5] || "https://gioithieu.rr3311.com";
 const registrationUrl =
   process.argv[6] || `${siteOrigin.replace(/\/$/, "")}/m/register?referralCode=mrh6472`;
+const userAgent =
+  process.argv[7] ||
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
 
 if (!captchaId) {
   console.error("missing captcha id");
@@ -25,9 +28,8 @@ process.on("unhandledRejection", (error) => {
   process.exit(3);
 });
 
-const userAgent =
-  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";
 const locationUrl = new URL(registrationUrl);
+const mobileFingerprint = /iPhone|iPad|Android|Mobile/i.test(userAgent);
 
 function makeElement(tagName) {
   return {
@@ -148,10 +150,27 @@ Object.defineProperty(globalThis, "navigator", {
     language: "vi-VN",
     userLanguage: "vi-VN",
     appName: "Netscape",
-    platform: "Win32",
+    platform: mobileFingerprint ? "iPhone" : "Win32",
+    maxTouchPoints: mobileFingerprint ? 5 : 0,
+    hardwareConcurrency: 8,
+    deviceMemory: 8,
   },
 });
-globalThis.screen = { width: 1920, height: 1080, availWidth: 1920, availHeight: 1040 };
+const screenWidth = mobileFingerprint ? 390 : 1920;
+const screenHeight = mobileFingerprint ? 844 : 1080;
+globalThis.screen = {
+  width: screenWidth,
+  height: screenHeight,
+  availWidth: screenWidth,
+  availHeight: mobileFingerprint ? 844 : 1040,
+  colorDepth: 24,
+  pixelDepth: 24,
+};
+globalThis.innerWidth = screenWidth;
+globalThis.innerHeight = screenHeight;
+globalThis.outerWidth = screenWidth;
+globalThis.outerHeight = screenHeight;
+globalThis.devicePixelRatio = mobileFingerprint ? 3 : 1;
 globalThis.document = {
   head,
   body,

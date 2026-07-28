@@ -21,6 +21,7 @@ Run("GG88 bank payload supports keyed useType rules", VerifyGgKeyedRulesPayload)
 Run("GG88 encrypted request matches browser content type", VerifyGgRequestTransport);
 Run("GG88 bank list recognizes masked account", VerifyGgMaskedAccount);
 Run("GG88 Vietnamese bank aliases match live codes", VerifyGgVietnameseBankCodes);
+Run("GG88 live bank cache extracts short aliases", VerifyGgLiveBankAliasCache);
 
 Console.WriteLine("DIRECT BANK PROTOCOL DIAGNOSTICS: PASS");
 return;
@@ -224,6 +225,49 @@ void VerifyGgVietnameseBankCodes()
     Equal("MBBANK", resolve.Invoke(null, ["MB BANK"]), "MB Bank code");
     Equal("ACB", resolve.Invoke(null, ["ACB"]), "ACB code");
     Equal("TECHCOMB", resolve.Invoke(null, ["TECHCOMBANK"]), "Techcombank code");
+    Equal("MARIBANK", resolve.Invoke(null, ["MSB"]), "MSB code");
+    Equal("EXIM", resolve.Invoke(null, ["EIB"]), "Eximbank code");
+    Equal("SBANK", resolve.Invoke(null, ["STB"]), "Sacombank code");
+    Equal("LVPBANK", resolve.Invoke(null, ["LPB"]), "LPBank code");
+}
+
+void VerifyGgLiveBankAliasCache()
+{
+    var cache = ggWorkflowType.GetMethod("CacheBankCodes", nonPublicStatic)
+                ?? throw new InvalidOperationException("CacheBankCodes was not found.");
+    var lookup = ggWorkflowType.GetMethod("TryGetCachedBankCode", nonPublicStatic)
+                 ?? throw new InvalidOperationException("TryGetCachedBankCode was not found.");
+    using var document = System.Text.Json.JsonDocument.Parse(
+        """
+        {
+          "data": {
+            "bankInfo": [
+              { "Img": "msb.png", "Name": "MARITIMEBANK(MSB)", "en": "MARIBANK" },
+              { "Img": "eib.png", "Name": "EXIMBANK(EIB)", "en": "EXIM" },
+              { "Img": "stb.png", "Name": "SACOMBANK(STB)", "en": "SBANK" },
+              { "Img": "lpb.png", "Name": "LIENVIETPOSTBANK(LPB)", "en": "LVPBANK" },
+              { "Img": "dab.png", "Name": "DONGABANK (DAB/EAB)", "en": "DAB" },
+              { "Img": "vikki.png", "Name": "Vikki Bank", "en": "DONGABANK" }
+            ]
+          }
+        }
+        """);
+    Equal(6, cache.Invoke(null, [document.RootElement]), "cached live bank count");
+
+    AssertCached("msb", "MARIBANK");
+    AssertCached("maritimebank", "MARIBANK");
+    AssertCached("eib", "EXIM");
+    AssertCached("stb", "SBANK");
+    AssertCached("lpb", "LVPBANK");
+    AssertCached("eab", "DAB");
+    AssertCached("dongabank", "DONGABANK");
+
+    void AssertCached(string alias, string expected)
+    {
+        object?[] arguments = [alias, null];
+        True(lookup.Invoke(null, arguments) is true, $"GG alias '{alias}' was not cached.");
+        Equal(expected, arguments[1], $"GG alias '{alias}'");
+    }
 }
 
 void VerifyGgBankPayload()
