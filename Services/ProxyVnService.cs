@@ -43,6 +43,17 @@ public sealed class ProxyVnService
         string apiKey,
         CancellationToken cancellationToken = default)
     {
+        var proxies = await BuyProxyPackagesAsync(package, apiKey, 1, cancellationToken)
+            .ConfigureAwait(false);
+        return proxies[0];
+    }
+
+    public async Task<IReadOnlyList<string>> BuyProxyPackagesAsync(
+        ProxyPackage package,
+        string apiKey,
+        int quantity,
+        CancellationToken cancellationToken = default)
+    {
         ArgumentNullException.ThrowIfNull(package);
 
         if (string.IsNullOrWhiteSpace(apiKey))
@@ -50,6 +61,14 @@ public sealed class ProxyVnService
             throw new ArgumentException(
                 "Proxy.vn API key is missing. Configure ProxyVn:ApiKey.",
                 nameof(apiKey));
+        }
+
+        if (quantity <= 0)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(quantity),
+                quantity,
+                "Proxy quantity must be greater than zero.");
         }
 
         if (package.ProxyType == 1)
@@ -62,17 +81,61 @@ public sealed class ProxyVnService
         const string type = "HTTP";
 
         _logger.LogInformation(
-            "Calling Proxy.vn API to buy package {PackageName}. ISP={Isp}, Type={Type}, Days={PeriodDays}",
+            "Calling Proxy.vn API to buy package {PackageName}. ISP={Isp}, Type={Type}, Days={PeriodDays}, Quantity={Quantity}",
             package.Name,
             proxyCategory,
             type,
-            package.PeriodDays);
+            package.PeriodDays,
+            quantity);
 
-        var proxyResult = await CallProxyVnAsync(
-                BuildBuyUrl(apiKey, proxyCategory, package.PeriodDays, type),
+        var proxyResults = await CallProxyVnBatchAsync(
+                BuildBuyUrl(apiKey, proxyCategory, package.PeriodDays, type, quantity),
                 cancellationToken)
             .ConfigureAwait(false);
 
+        var verifiedProxies = new List<string>(Math.Min(quantity, proxyResults.Count));
+        foreach (var proxyResult in proxyResults.Take(quantity))
+        {
+            var verifiedProxy = await TryGetUsableProxyAsync(
+                    proxyResult,
+                    apiKey,
+                    proxyCategory,
+                    type,
+                    cancellationToken)
+                .ConfigureAwait(false);
+
+            if (verifiedProxy is not null
+                && !verifiedProxies.Contains(verifiedProxy, StringComparer.OrdinalIgnoreCase))
+            {
+                verifiedProxies.Add(verifiedProxy);
+            }
+        }
+
+        if (verifiedProxies.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Proxy.vn did not return any usable proxy for the requested quantity ({quantity}).");
+        }
+
+        if (verifiedProxies.Count < quantity)
+        {
+            _logger.LogWarning(
+                "Proxy.vn purchase was only partially fulfilled. Requested={Requested}, Usable={Usable}",
+                quantity,
+                verifiedProxies.Count);
+        }
+
+        return verifiedProxies;
+    }
+
+    private async Task<string?> TryGetUsableProxyAsync(
+        ProxyVnProxyResult initialProxyResult,
+        string apiKey,
+        string proxyCategory,
+        string type,
+        CancellationToken cancellationToken)
+    {
+        var proxyResult = initialProxyResult;
         ProxyConnectivityCheckResult? lastCheck = null;
         string? lastProxy = null;
         for (var attempt = 1; attempt <= MaxUsableProxyAttempts; attempt++)
@@ -106,19 +169,46 @@ public sealed class ProxyVnService
                 break;
             }
 
-            proxyResult = await CallProxyVnAsync(
-                    BuildChangeUrl(apiKey, proxyCategory, proxyCategory, type, proxyResult.IdProxy.Value),
-                    cancellationToken)
-                .ConfigureAwait(false);
+            try
+            {
+                proxyResult = await CallProxyVnAsync(
+                        BuildChangeUrl(apiKey, proxyCategory, proxyCategory, type, proxyResult.IdProxy.Value),
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+            {
+                throw;
+            }
+            catch (Exception exception)
+            {
+                // A failed replacement for one endpoint must not discard the
+                // other proxies from the same batch purchase.
+                _logger.LogWarning(
+                    exception,
+                    "Proxy.vn could not replace an unusable proxy. ProxyId={ProxyId}",
+                    proxyResult.IdProxy);
+                break;
+            }
         }
 
-        throw new InvalidOperationException(
-            $"Proxy.vn returned an unusable proxy after {MaxUsableProxyAttempts} attempt(s): " +
-            $"{(lastProxy is null ? string.Empty : MaskProxy(lastProxy) + " - ")}" +
-            $"{lastCheck?.Message ?? "unknown verification failure"}");
+        _logger.LogWarning(
+            "Proxy.vn proxy remained unusable after {Attempts} attempt(s). Proxy={Proxy}, Reason={Reason}",
+            MaxUsableProxyAttempts,
+            lastProxy is null ? "<missing>" : MaskProxy(lastProxy),
+            lastCheck?.Message ?? "unknown verification failure");
+        return null;
     }
 
     private async Task<ProxyVnProxyResult> CallProxyVnAsync(
+        string url,
+        CancellationToken cancellationToken)
+    {
+        var results = await CallProxyVnBatchAsync(url, cancellationToken).ConfigureAwait(false);
+        return results[0];
+    }
+
+    private async Task<IReadOnlyList<ProxyVnProxyResult>> CallProxyVnBatchAsync(
         string url,
         CancellationToken cancellationToken)
     {
@@ -150,41 +240,81 @@ public sealed class ProxyVnService
         try
         {
             using var document = JsonDocument.Parse(json);
-            return ReadProxyResult(document.RootElement, json);
+            return ReadProxyResults(document.RootElement, json);
         }
-        catch (JsonException exception)
+        catch (JsonException firstException)
         {
-            _logger.LogError(
-                exception,
-                "Failed to parse Proxy.vn JSON. ContentLength={ContentLength}",
-                json.Length);
-            throw new InvalidOperationException("Proxy.vn returned invalid JSON.", exception);
+            // Some versions of the Proxy.vn documentation show multiple root
+            // objects separated by commas rather than a JSON array. Accept
+            // that response shape as a compatibility fallback.
+            try
+            {
+                using var wrappedDocument = JsonDocument.Parse($"[{json}]");
+                return ReadProxyResults(wrappedDocument.RootElement, json);
+            }
+            catch (JsonException)
+            {
+                _logger.LogError(
+                    firstException,
+                    "Failed to parse Proxy.vn JSON. ContentLength={ContentLength}",
+                    json.Length);
+                throw new InvalidOperationException("Proxy.vn returned invalid JSON.", firstException);
+            }
         }
     }
 
     private static ProxyVnProxyResult ReadProxyResult(JsonElement root, string rawJson)
     {
+        return ReadProxyResults(root, rawJson)[0];
+    }
+
+    private static IReadOnlyList<ProxyVnProxyResult> ReadProxyResults(
+        JsonElement root,
+        string rawJson)
+    {
+        var results = new List<ProxyVnProxyResult>();
+
         if (root.ValueKind == JsonValueKind.Array)
         {
             foreach (var item in root.EnumerateArray())
             {
                 if (item.ValueKind == JsonValueKind.Object && HasProxyData(item))
                 {
-                    return ReadProxyResult(item, rawJson);
+                    results.Add(ReadProxyObject(item, rawJson));
+                }
+                else if (item.ValueKind == JsonValueKind.Object)
+                {
+                    ValidateNonProxyStatus(item, rawJson);
                 }
             }
-
-            if (root.GetArrayLength() > 0)
+        }
+        else if (root.ValueKind == JsonValueKind.Object)
+        {
+            if (HasProxyData(root))
             {
-                return ReadProxyResult(root[0], rawJson);
+                results.Add(ReadProxyObject(root, rawJson));
+            }
+            else
+            {
+                ValidateNonProxyStatus(root, rawJson);
             }
         }
-
-        if (root.ValueKind != JsonValueKind.Object)
+        else
         {
             throw new InvalidOperationException($"Unexpected Proxy.vn response format: {rawJson}");
         }
 
+        if (results.Count == 0)
+        {
+            throw new InvalidOperationException(
+                $"Proxy.vn response did not contain any purchased proxy: {ReadErrorMessage(root, rawJson)}");
+        }
+
+        return results;
+    }
+
+    private static ProxyVnProxyResult ReadProxyObject(JsonElement root, string rawJson)
+    {
         var status = TryGetInt(root, "status");
         if (status is not null && status != 100)
         {
@@ -223,6 +353,18 @@ public sealed class ProxyVnService
         return new ProxyVnProxyResult(
             candidateProxies,
             TryGetInt(root, "idproxy"));
+    }
+
+    private static void ValidateNonProxyStatus(JsonElement element, string rawJson)
+    {
+        var status = TryGetInt(element, "status");
+        if (status is null or 100 or 200 or 201)
+        {
+            return;
+        }
+
+        throw new InvalidOperationException(
+            $"Proxy.vn API error status={status}: {ReadErrorMessage(element, rawJson)}");
     }
 
     private static bool HasProxyData(JsonElement element) =>
@@ -325,11 +467,12 @@ public sealed class ProxyVnService
         string apiKey,
         string proxyCategory,
         int days,
-        string type) =>
+        string type,
+        int quantity = 1) =>
         "https://proxy.vn/apiv2/muaproxy.php" +
         $"?key={Uri.EscapeDataString(apiKey)}" +
         $"&loaiproxy={Uri.EscapeDataString(proxyCategory)}" +
-        "&soluong=1" +
+        $"&soluong={Math.Max(1, quantity)}" +
         $"&ngay={Math.Max(1, days)}" +
         $"&type={Uri.EscapeDataString(type)}" +
         "&user=random&password=random";

@@ -1,9 +1,9 @@
 const captchaId = process.argv[2];
 const sdkCdn = process.argv[3] || "https://images.0998455.com/";
 const sdkVersion = process.argv[4] || "1";
-const siteOrigin = process.argv[5] || "https://gioithieu.rr3311.com";
+const siteOrigin = process.argv[5] || "https://www.rr3311.com";
 const registrationUrl =
-  process.argv[6] || `${siteOrigin.replace(/\/$/, "")}/m/register?referralCode=mrh6472`;
+  process.argv[6] || `${siteOrigin.replace(/\/$/, "")}/register?referralCode=hug0888&affiliateCode=gioithieu`;
 const userAgent =
   process.argv[7] ||
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36";

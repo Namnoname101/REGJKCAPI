@@ -12,6 +12,7 @@ namespace BAOCODETOOL.Services;
 
 public sealed class ResultSenderService : IResultSenderService
 {
+    private const string BrandName = "KJC BOT";
     private static readonly TimeSpan MinimumEditInterval = TimeSpan.FromSeconds(1.5);
     private readonly ITelegramBotClient _botClient;
     private readonly ILogger<ResultSenderService> _logger;
@@ -94,8 +95,8 @@ public sealed class ResultSenderService : IResultSenderService
         }
 
         var completionText = job.IsBulk
-            ? "✅ <b>Tất cả tài khoản trong danh sách đã chạy xong!</b>\nBấm nút bên dưới để thêm tiếp hoặc kiểm tra trạng thái:"
-            : "✅ <b>Tất cả yêu cầu đã hoàn thành!</b>\nBấm nút bên dưới để thêm tiếp hoặc kiểm tra trạng thái:";
+            ? $"✅ <b>{BrandName} đã xử lý xong toàn bộ danh sách.</b>\nBạn có thể tiếp tục đăng ký hoặc theo dõi yêu cầu khác:"
+            : $"✅ <b>{BrandName} đã hoàn tất yêu cầu.</b>\nBạn có thể tiếp tục đăng ký hoặc sử dụng dịch vụ khác:";
 
         try
         {
@@ -156,6 +157,7 @@ public sealed class ResultSenderService : IResultSenderService
                 job.StatusMessageId,
                 text,
                 ParseMode.Html,
+                replyMarkup: BuildResultActionsKeyboard(job),
                 cancellationToken: cancellationToken);
 
             state.LastEdit = DateTimeOffset.UtcNow;
@@ -188,7 +190,7 @@ public sealed class ResultSenderService : IResultSenderService
 
         return $"⚙️ <b>[{Html(account.FullName)}] Đang chờ tới lượt...</b>\n" +
                "⬜⬜⬜⬜⬜⬜⬜⬜⬜⬜  0%\n\n" +
-               $"<b>Tiến độ từng site:</b>\n{progressLines}";
+               $"<b>Tiến độ từng dịch vụ:</b>\n{progressLines}";
     }
 
     private static string BuildProgressText(RegistrationJob job)
@@ -229,9 +231,9 @@ public sealed class ResultSenderService : IResultSenderService
             {
                 AccountStatus.Success => "Xong",
                 AccountStatus.Failed => BuildFailureStep(siteRun),
-                AccountStatus.Phase1_RegDone => "ĐK xong, đang set bank...",
-                AccountStatus.Running => "Đang chạy...",
-                _ => "Chờ..."
+                AccountStatus.Phase1_RegDone => "Đã đăng ký, đang cập nhật ngân hàng...",
+                AccountStatus.Running => "Đang xử lý...",
+                _ => "Đang chờ..."
             };
 
             siteLines.AppendLine($"  {icon} <b>{siteRun.Site}</b> — {step}");
@@ -250,7 +252,7 @@ public sealed class ResultSenderService : IResultSenderService
 
             return heading +
                    $"{progressBar}  {percentage}%\n\n" +
-                   $"<b>Tiến độ từng site:</b>\n{siteLines}";
+                   $"<b>Tiến độ từng dịch vụ:</b>\n{siteLines}";
         }
 
         var anySuccess = selectedRuns.Any(siteRun => siteRun.Status == AccountStatus.Success);
@@ -258,27 +260,37 @@ public sealed class ResultSenderService : IResultSenderService
         {
             var name = job.IsBulk ? $": {Html(account.FullName)}" : string.Empty;
             return $"❌ <b>THẤT BẠI{name}</b> — Tất cả các trang đều lỗi.\n\n" +
-                   $"<b>Kết quả từng site:</b>\n{siteLines}";
+                   $"<b>Kết quả từng dịch vụ:</b>\n{siteLines}" +
+                   ResultRetentionNotice;
         }
 
-        return BuildSuccessText(job, progressBar, siteLines.ToString());
+        var hasFailures = selectedRuns.Any(siteRun => siteRun.Status == AccountStatus.Failed);
+        return BuildSuccessText(job, progressBar, siteLines.ToString(), hasFailures, selectedRuns.Count);
     }
 
     private static string BuildSuccessText(
         RegistrationJob job,
         string progressBar,
-        string siteLines)
+        string siteLines,
+        bool hasFailures,
+        int selectedRunCount)
     {
         var account = job.Account;
-        var heading = job.IsBulk
-            ? $"✅ <b>HOÀN TẤT: {Html(account.FullName)}</b>\n"
-            : "✅ <b>HOÀN TẤT!</b>\n";
+        var successCount = account.SiteRuns.Count(siteRun =>
+            siteRun.IsSelected && siteRun.Status == AccountStatus.Success);
+        var heading = hasFailures
+            ? job.IsBulk
+                ? $"⚠️ <b>HOÀN TẤT MỘT PHẦN: {Html(account.FullName)}</b> — {successCount}/{selectedRunCount} dịch vụ thành công\n"
+                : $"⚠️ <b>HOÀN TẤT MỘT PHẦN</b> — {successCount}/{selectedRunCount} dịch vụ thành công\n"
+            : job.IsBulk
+                ? $"✅ <b>HOÀN TẤT: {Html(account.FullName)}</b>\n"
+                : "✅ <b>HOÀN TẤT!</b>\n";
 
         var changedUsernames = string.Empty;
         if (account.SpecificUsernames.Any())
         {
             var builder = new StringBuilder(
-                "\n\n⚠️ <b>LƯU Ý: Một số site bị trùng tên và đã đổi thành:</b>\n");
+                "\n\n⚠️ <b>LƯU Ý: Một số dịch vụ bị trùng tên và đã tự động đổi thành:</b>\n");
 
             foreach (var pair in account.SpecificUsernames)
             {
@@ -299,22 +311,64 @@ public sealed class ResultSenderService : IResultSenderService
                $"🔑 TK chung:  <code>{Html(account.Username)}</code>\n" +
                $"🔒 MK chung:  <code>{Html(account.Password)}</code>\n" +
                $"🔐 MK cấp 2: <code>{Html(account.Level2Password)}</code>\n\n" +
-               $"<b>Kết quả từng site:</b>\n{siteLines}{changedUsernames}";
+               $"<b>Kết quả từng dịch vụ:</b>\n{siteLines}{changedUsernames}" +
+               ResultRetentionNotice;
+    }
+
+    private const string ResultRetentionNotice =
+        "\n📌 <i>Kết quả này được giữ trong cuộc trò chuyện để bạn xem và sao chép lại. " +
+        "Chỉ ẩn khi bạn chủ động bấm nút bên dưới.</i>";
+
+    private static InlineKeyboardMarkup? BuildResultActionsKeyboard(RegistrationJob job)
+    {
+        var selectedRuns = job.Account.SiteRuns.Where(siteRun => siteRun.IsSelected).ToList();
+        var isFinal = selectedRuns.Count > 0 && selectedRuns.All(siteRun =>
+            siteRun.Status is AccountStatus.Success or AccountStatus.Failed);
+
+        return isFinal
+            ? new InlineKeyboardMarkup(
+                InlineKeyboardButton.WithCallbackData("🗑 Ẩn kết quả", "hide_result"))
+            : null;
     }
 
     private static string BuildFailureStep(SiteRunModel siteRun)
     {
-        const int maxLength = 180;
-        var message = siteRun.LogMessage.Replace("\r", " ").Replace("\n", " ").Trim();
-        if (message.Length > maxLength)
-        {
-            message = message[..maxLength] + "...";
-        }
+        var message = siteRun.LogMessage ?? string.Empty;
 
-        return string.IsNullOrWhiteSpace(message)
-            ? "Thất bại"
-            : $"Thất bại ({Html(message)})";
+        if (ContainsAny(
+                message,
+                "captcha",
+                "geetest",
+                "mã xác minh",
+                "ma xac minh",
+                "verification code"))
+            return "Bước xác minh chưa hoàn tất";
+
+        // "Direct HTTP registration failed" is part of every direct API
+        // failure, not evidence of a transport outage. Match only concrete
+        // network signals so Telegram does not mislabel server-side errors.
+        if (ContainsAny(
+                message,
+                "proxy",
+                "connection",
+                "network",
+                "timeout",
+                "timed out",
+                "httprequestexception",
+                "direct http exception"))
+            return "Kết nối tạm thời gián đoạn";
+
+        if (ContainsAny(message, "bank", "ngân hàng", "account number"))
+            return "Chưa thể cập nhật thông tin ngân hàng";
+
+        if (ContainsAny(message, "duplicate", "already", "exists", "username", "phone"))
+            return "Thông tin đã tồn tại hoặc chưa hợp lệ";
+
+        return "Chưa thể hoàn tất";
     }
+
+    private static bool ContainsAny(string value, params string[] terms) =>
+        terms.Any(term => value.Contains(term, StringComparison.OrdinalIgnoreCase));
 
     private void StopTracking(RegistrationJob job)
     {
@@ -335,9 +389,12 @@ public sealed class ResultSenderService : IResultSenderService
     private static InlineKeyboardMarkup MainMenuKeyboard() =>
         new(new[]
         {
-            new[] { InlineKeyboardButton.WithCallbackData("➕ Thêm 1 tài khoản (Từng bước)", "start_add") },
-            new[] { InlineKeyboardButton.WithCallbackData("📋 Nhập nhiều tài khoản (Hàng loạt)", "start_bulk") },
-            new[] { InlineKeyboardButton.WithCallbackData("📊 Xem trạng thái hệ thống", "status") }
+            new[] { InlineKeyboardButton.WithCallbackData("➕ Đăng ký 1 tài khoản", "start_add") },
+            new[] { InlineKeyboardButton.WithCallbackData("📋 Đăng ký hàng loạt", "start_bulk") },
+            new[] { InlineKeyboardButton.WithCallbackData("📊 Theo dõi yêu cầu", "status") },
+            new[] { InlineKeyboardButton.WithCallbackData("👤 Tài khoản của tôi", "account_balance") },
+            new[] { InlineKeyboardButton.WithCallbackData("🌐 Thuê proxy", "buy_proxy") },
+            new[] { InlineKeyboardButton.WithCallbackData("💰 Nạp số dư", "deposit") }
         });
 
     private sealed class TrackingState

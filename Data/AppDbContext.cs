@@ -1,4 +1,5 @@
 using BAOCODETOOL.Models;
+using BAOCODETOOL.Core;
 using Microsoft.EntityFrameworkCore;
 
 namespace BAOCODETOOL.Data;
@@ -34,6 +35,24 @@ public sealed class AppDbContext : DbContext
                     CONSTRAINT ""FK_Jobs_Users_UserId"" FOREIGN KEY (""UserId"") REFERENCES ""Users"" (""Id"") ON DELETE CASCADE
                 );
                 CREATE INDEX IF NOT EXISTS ""IX_Jobs_UserId"" ON ""Jobs"" (""UserId"");
+
+                CREATE TABLE IF NOT EXISTS ""SePayWebhookTransactions"" (
+                    ""Id"" INTEGER NOT NULL CONSTRAINT ""PK_SePayWebhookTransactions"" PRIMARY KEY AUTOINCREMENT,
+                    ""SePayTransactionId"" INTEGER NOT NULL,
+                    ""Gateway"" TEXT NOT NULL,
+                    ""AccountNumber"" TEXT NOT NULL,
+                    ""TransferType"" TEXT NOT NULL,
+                    ""TransferAmount"" TEXT NOT NULL,
+                    ""Content"" TEXT NOT NULL,
+                    ""ReferenceCode"" TEXT NOT NULL,
+                    ""ChatId"" INTEGER NULL,
+                    ""Status"" TEXT NOT NULL,
+                    ""StatusMessage"" TEXT NULL,
+                    ""TransactionDate"" TEXT NOT NULL,
+                    ""ReceivedAt"" TEXT NOT NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ""IX_SePayWebhookTransactions_SePayTransactionId""
+                    ON ""SePayWebhookTransactions"" (""SePayTransactionId"");
 
                 CREATE TABLE IF NOT EXISTS ""ProxyPackages"" (
                     ""Id"" INTEGER NOT NULL CONSTRAINT ""PK_ProxyPackages"" PRIMARY KEY AUTOINCREMENT,
@@ -171,12 +190,13 @@ public sealed class AppDbContext : DbContext
     public DbSet<Transaction> Transactions => Set<Transaction>();
     public DbSet<Job> Jobs => Set<Job>();
     public DbSet<ProxyPackage> ProxyPackages => Set<ProxyPackage>();
+    public DbSet<SePayWebhookTransaction> SePayWebhookTransactions => Set<SePayWebhookTransaction>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
         if (!optionsBuilder.IsConfigured)
         {
-            optionsBuilder.UseSqlite("Data Source=vibecodereg.db");
+            optionsBuilder.UseSqlite($"Data Source={RuntimePaths.DatabasePath}");
         }
     }
 
@@ -219,6 +239,13 @@ public sealed class AppDbContext : DbContext
                 .WithMany(p => p.Jobs)
                 .HasForeignKey(d => d.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<SePayWebhookTransaction>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.SePayTransactionId).IsUnique();
+            entity.Property(e => e.TransferAmount).HasPrecision(18, 4);
         });
 
         modelBuilder.Entity<ProxyPackage>(entity =>

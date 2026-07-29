@@ -14,6 +14,10 @@ internal sealed class SitePerformanceMetrics
 
     public long RegistrationMs { get; set; }
 
+    public long VerificationMs { get; set; }
+
+    public string? VerificationProvider { get; set; }
+
     public long BankSetupMs { get; set; }
 
     public long BrowserResetMs { get; set; }
@@ -37,7 +41,7 @@ internal static class SitePerformanceMetricsWriter
 
         try
         {
-            var metricsDirectory = Path.Combine(AppContext.BaseDirectory, "metrics");
+            var metricsDirectory = RuntimePaths.MetricsDirectory;
             var metricsPath = Path.Combine(metricsDirectory, "site-performance.jsonl");
             var payload = new
             {
@@ -50,6 +54,8 @@ internal static class SitePerformanceMetricsWriter
                 metrics.CapacityWaitMs,
                 metrics.BrowserAcquireMs,
                 metrics.RegistrationMs,
+                metrics.VerificationMs,
+                metrics.VerificationProvider,
                 metrics.BankSetupMs,
                 metrics.BrowserResetMs,
                 metrics.TotalMs

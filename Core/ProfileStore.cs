@@ -10,7 +10,7 @@ namespace BAOCODETOOL.Core;
 
 public static class ProfileStore
 {
-    private static readonly string SaveFilePath = Path.Combine(AppContext.BaseDirectory, "profiles_data.json");
+    private static readonly string SaveFilePath = RuntimePaths.ProfilesDataPath;
     private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
     public class ProfileSaveData

@@ -146,8 +146,12 @@ For Proxy.vn purchases, the service follows the API v2 response fields and
 prefers the original endpoint assembled from `ip`, `port`, `user`, and
 `password`. If the response also contains a different intermediary endpoint in
 `proxy`, that endpoint is retained as a verified fallback. An unusable purchase
-is changed through `doiproxy.php` up to three times before the bot reports a
-purchase error; the customer is charged only after a usable endpoint is found.
+is changed through `doiproxy.php` up to three times. In Telegram, customers
+select a package, enter a quantity, and confirm the calculated total before
+the API receives that quantity through `soluong`. If Proxy.vn only fulfills
+part of the request, the bot sends the usable proxies it received and charges
+only for that fulfilled quantity. The per-order input ceiling is configurable
+through `ProxyVn:MaxPurchaseQuantity` (default: `100`).
 
 ## Run
 
@@ -159,13 +163,50 @@ dotnet run
 
 Stop cleanly with `Ctrl+C`.
 
-For a release executable:
+For a framework-dependent development executable:
 
 ```powershell
 dotnet publish -c Release -r win-x64 --self-contained false
 ```
 
 The executable is written below `bin\Release\net8.0-windows\win-x64\publish`.
+
+## Bản EXE Windows một-chạm
+
+Tạo bản phát hành self-contained bằng:
+
+```powershell
+.\scripts\Publish-Standalone.ps1
+```
+
+Mỗi lần chạy script sẽ tạo một thư mục phát hành mới dưới `artifacts` với đúng
+một file `BAOCODETOOL.exe`. Chỉ cần chuyển file EXE này sang máy Windows 64-bit
+và mở nó; .NET runtime, dashboard local, và backend đều đã được đóng gói bên
+trong.
+
+Ở lần mở đầu, EXE tạo file cấu hình mẫu tại:
+
+```text
+%LOCALAPPDATA%\VibeCodeReg\settings.json
+```
+
+Điền ít nhất `Telegram.BotToken` và `Telegram.AdminChatId` vào file này, rồi
+mở lại EXE. File cấu hình và toàn bộ dữ liệu vận hành (SQLite, profiles, danh
+sách người dùng, kết quả, metrics) nằm trong `%LOCALAPPDATA%\VibeCodeReg`, vì
+vậy có thể thay EXE bằng bản mới mà không mất dữ liệu. `appsettings.json` của
+source chỉ dùng cho phát triển và không được nhúng vào EXE phát hành.
+
+Sau khi host khởi động, trình duyệt mặc định tự mở dashboard local. Đóng tab
+trình duyệt không tắt bot; tắt cửa sổ console hoặc dùng `Ctrl+C` để dừng sạch.
+Một instance duy nhất được phép chạy để tránh Telegram long-polling conflict và
+tranh chấp SQLite; mở EXE lần hai chỉ mở dashboard của instance đang chạy.
+EXE cũng có icon ở khay hệ thống Windows: nhấp đúp để mở dashboard hoặc nhấp
+chuột phải và chọn **Dừng ứng dụng** để tắt sạch.
+
+Máy chạy luồng Telegram/web không cần cài .NET. Các luồng captcha/browser vẫn
+cần Google Chrome và, với các flow gọi script GeeTest, Node.js trong `PATH`.
+Trước khi phát hành, rotate mọi token/API key từng lưu trong source và chỉ lưu
+chúng trong `settings.json` hoặc biến môi trường của Windows.
 
 ## Runtime pipeline
 

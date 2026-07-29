@@ -15,15 +15,18 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
     private readonly SemaphoreSlim _browserStartupGate;
     private readonly IBrowserSessionPool _browserSessionPool;
     private readonly IBrowserConcurrencyGovernor _browserConcurrencyGovernor;
+    private readonly CaptchaSolverOptions _captchaSolverOptions;
 
     public BrowserAutomationService(
         IOptions<AutomationOptions> options,
+        IOptions<CaptchaSolverOptions> captchaSolverOptions,
         IProfileRepository profileRepository,
         IBrowserSessionPool browserSessionPool,
         IBrowserConcurrencyGovernor browserConcurrencyGovernor,
         ILogger<BrowserAutomationService> logger)
     {
         _options = options.Value;
+        _captchaSolverOptions = captchaSolverOptions.Value;
         _profileRepository = profileRepository;
         _browserSessionPool = browserSessionPool;
         _browserConcurrencyGovernor = browserConcurrencyGovernor;
@@ -60,7 +63,8 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
                 enableDirectHttpRegistration: _options.EnableDirectHttpRegistration,
                 enableBrowserFallback: _options.EnableBrowserFallback,
                 browserSessionPool: _browserSessionPool,
-                browserConcurrencyGovernor: _browserConcurrencyGovernor);
+                browserConcurrencyGovernor: _browserConcurrencyGovernor,
+                captchaSolverOptions: _captchaSolverOptions);
         }
         finally
         {

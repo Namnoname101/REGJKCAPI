@@ -44,7 +44,8 @@ public static class DriverFactory
         bool headless = false,
         TargetSite? site = null,
         bool verifyProxy = true,
-        bool deleteProfileOnDispose = false)
+        bool deleteProfileOnDispose = false,
+        bool forceMobileEmulation = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profileFolderPath);
         Directory.CreateDirectory(profileFolderPath);
@@ -58,7 +59,8 @@ public static class DriverFactory
             profileFolderPath,
             userAgent,
             headless,
-            site);
+            site,
+            forceMobileEmulation);
         var service = ChromeDriverService.CreateDefaultService();
         service.HideCommandPromptWindow = true;
         service.SuppressInitialDiagnosticInformation = true;
@@ -112,7 +114,8 @@ public static class DriverFactory
 
             // Chặn tải các tài nguyên nặng bằng CDP để cực kỳ nhẹ và chống đơ
             var emptyDict = new System.Collections.Generic.Dictionary<string, object>();
-            var blockedUrls = site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88
+            var blockedUrls = forceMobileEmulation
+                              || site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88
                 ? new[]
                 {
                     "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
@@ -135,7 +138,8 @@ public static class DriverFactory
             driver.ExecuteCdpCommand("Network.enable", emptyDict);
             driver.ExecuteCdpCommand("Network.setBlockedURLs", blockedDict);
 
-            if (site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88)
+            if (forceMobileEmulation
+                || site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88)
             {
                 driver.ExecuteCdpCommand(
                     "Emulation.setDeviceMetricsOverride",
@@ -192,9 +196,11 @@ public static class DriverFactory
         string profileFolderPath,
         string? userAgent,
         bool headless,
-        TargetSite? site)
+        TargetSite? site,
+        bool forceMobileEmulation)
     {
-        var useMobileSite = site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88;
+        var useMobileSite = forceMobileEmulation
+                            || site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88;
         var options = new ChromeOptions
         {
             // Registration strategies already wait for their own form/toast

@@ -62,7 +62,7 @@ async function evalScriptFromUrl(url, element) {
   const response = await fetch(absolute, {
     headers: {
       "user-agent": userAgent,
-      referer: "https://gioithieu.rr3311.com/",
+      referer: "https://www.rr3311.com/",
     },
   });
   if (!response.ok) {
@@ -104,9 +104,9 @@ Object.defineProperty(globalThis, "location", {
   configurable: true,
   value: {
   protocol: "https:",
-  host: "gioithieu.rr3311.com",
-  hostname: "gioithieu.rr3311.com",
-  href: "https://gioithieu.rr3311.com/m/register?referralCode=mrh6472",
+  host: "www.rr3311.com",
+  hostname: "www.rr3311.com",
+  href: "https://www.rr3311.com/register?referralCode=hug0888&affiliateCode=gioithieu",
   },
 });
 Object.defineProperty(globalThis, "navigator", {
@@ -156,7 +156,7 @@ for (const store of [globalThis.localStorage, globalThis.sessionStorage]) {
 }
 
 const boc = await fetch("https://images.0998455.com/TCG_PROD_IMAGES/B2C/libs/gt/boc.js?v=1", {
-  headers: { "user-agent": userAgent, referer: "https://gioithieu.rr3311.com/" },
+  headers: { "user-agent": userAgent, referer: "https://www.rr3311.com/" },
 }).then((response) => response.text());
 (0, eval)(boc);
 

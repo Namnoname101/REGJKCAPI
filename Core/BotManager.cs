@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using BAOCODETOOL.Configuration;
 using BAOCODETOOL.Models;
 using BAOCODETOOL.Strategies;
 
@@ -56,7 +57,8 @@ public sealed class BotManager
         bool enableBrowserFallback = false,
         int maxConcurrentSitesPerAccount = 1,
         IBrowserSessionPool? browserSessionPool = null,
-        IBrowserConcurrencyGovernor? browserConcurrencyGovernor = null)
+        IBrowserConcurrencyGovernor? browserConcurrencyGovernor = null,
+        CaptchaSolverOptions? captchaSolverOptions = null)
     {
         ArgumentNullException.ThrowIfNull(profiles);
 
@@ -93,7 +95,8 @@ public sealed class BotManager
                 enableDirectHttpRegistration,
                 enableBrowserFallback,
                 browserSessionPool,
-                browserConcurrencyGovernor));
+                browserConcurrencyGovernor,
+                captchaSolverOptions));
         }
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -115,7 +118,8 @@ private async Task RunAccountSitesConcurrentlyAsync(
     bool enableDirectHttpRegistration,
     bool enableBrowserFallback,
     IBrowserSessionPool? browserSessionPool,
-    IBrowserConcurrencyGovernor? browserConcurrencyGovernor)
+    IBrowserConcurrencyGovernor? browserConcurrencyGovernor,
+    CaptchaSolverOptions? captchaSolverOptions)
 {
     var siteRuns = account.SiteRuns
         .Where(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone)
@@ -166,7 +170,8 @@ private async Task RunAccountSitesConcurrentlyAsync(
             enableDirectHttpRegistration,
             enableBrowserFallback,
             browserSessionPool,
-            browserConcurrencyGovernor))
+            browserConcurrencyGovernor,
+            captchaSolverOptions))
         .ToArray();
 
     await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -184,7 +189,8 @@ private async Task RunJobAsync(
     bool enableDirectHttpRegistration,
     bool enableBrowserFallback,
     IBrowserSessionPool? browserSessionPool,
-    IBrowserConcurrencyGovernor? browserConcurrencyGovernor)
+    IBrowserConcurrencyGovernor? browserConcurrencyGovernor,
+    CaptchaSolverOptions? captchaSolverOptions)
 {
     var accountSlotAcquired = false;
     var slotAcquired = false;
@@ -208,7 +214,8 @@ private async Task RunJobAsync(
                     siteRun,
                     executionContext,
                     onSiteCompleted,
-                    enableBrowserFallback)
+                    enableBrowserFallback,
+                    captchaSolverOptions)
                 .ConfigureAwait(false))
             {
                 return;
@@ -394,7 +401,8 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
     SiteRunModel siteRun,
     AutomationExecutionContext executionContext,
     Action? onSiteCompleted,
-    bool enableBrowserFallback)
+    bool enableBrowserFallback,
+    CaptchaSolverOptions? captchaSolverOptions)
 {
     var metrics = new SitePerformanceMetrics();
     var totalStopwatch = Stopwatch.StartNew();
@@ -415,10 +423,13 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
             var outcome = await DirectRegistrationWorkflow.TryRegisterAsync(
                     account,
                     siteRun.Site,
-                    executionContext.CancellationToken)
+                    executionContext.CancellationToken,
+                    captchaSolverOptions)
                 .ConfigureAwait(false);
             registrationStopwatch.Stop();
             metrics.RegistrationMs += registrationStopwatch.ElapsedMilliseconds;
+            metrics.VerificationMs += outcome.VerificationMs;
+            metrics.VerificationProvider = outcome.VerificationProvider;
 
             if (outcome.Status == DirectRegistrationStatus.Success)
             {

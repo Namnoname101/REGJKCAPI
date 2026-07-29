@@ -5,6 +5,22 @@
     <TargetFramework>net8.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <UseWindowsForms>true</UseWindowsForms>
+    <!-- Static files are extracted by RuntimePaths, so the Web SDK must not
+         publish a second loose copy next to the standalone executable. -->
+    <EnableDefaultContentItems>false</EnableDefaultContentItems>
+    <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
+    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**;diagnostics\**;scratch_test\**</DefaultItemExcludes>
+  </PropertyGroup>
+
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+    <SelfContained>true</SelfContained>
+    <PublishSingleFile>true</PublishSingleFile>
+    <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
+    <PublishTrimmed>false</PublishTrimmed>
+    <DebugType>embedded</DebugType>
+    <IsTransformWebConfigDisabled>true</IsTransformWebConfigDisabled>
   </PropertyGroup>
 
   <ItemGroup>
@@ -29,15 +45,37 @@
     <Compile Remove="diagnostics\tools\**\*.cs" />
     <Compile Remove="ViewModels\**\*.cs" />
     <Compile Remove="Views\**\*.cs" />
-    <Content Remove="artifacts\**\*" />
-    <Content Remove="diagnostics\tools\**\bin\**\*" />
-    <Content Remove="diagnostics\tools\**\obj\**\*" />
-    <None Include="appsettings.json" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="Core\geetest_token.js" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="Core\gg_geetest_token.js" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="wwwroot\**\*" CopyToOutputDirectory="PreserveNewest" />
-    <None Include="diagnostics\tools\**\*"
-          Exclude="diagnostics\tools\**\bin\**\*;diagnostics\tools\**\obj\**\*" />
+    <!-- Keep local developer configuration out of a published EXE. -->
+    <None Update="appsettings.json"
+          CopyToOutputDirectory="PreserveNewest"
+          CopyToPublishDirectory="Never" />
+
+    <!-- RuntimePaths writes these small read-only assets to LocalAppData on
+         first launch, allowing the distribution folder to contain one EXE. -->
+    <EmbeddedResource Include="wwwroot\**\*">
+      <LogicalName>BAOCODETOOL.RuntimeAssets/wwwroot/%(RecursiveDir)%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Core\geetest_token.js">
+      <LogicalName>BAOCODETOOL.RuntimeAssets/Core/geetest_token.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Core\gg_geetest_token.js">
+      <LogicalName>BAOCODETOOL.RuntimeAssets/Core/gg_geetest_token.js</LogicalName>
+    </EmbeddedResource>
+    <EmbeddedResource Include="Configuration\settings.template.json">
+      <LogicalName>BAOCODETOOL.RuntimeAssets/settings.template.json</LogicalName>
+    </EmbeddedResource>
   </ItemGroup>
+
+  <!-- Selenium.WebDriver ships managers for every OS. The Windows manager is
+       bundled as a native executable; omit the two unused Unix binaries so
+       the published directory stays a single Windows EXE. -->
+  <Target Name="RemoveUnusedSeleniumManagers"
+          AfterTargets="ComputeFilesToPublish"
+          BeforeTargets="_ComputeFilesToBundle">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+                             Condition="'%(ResolvedFileToPublish.RelativePath)' == 'selenium-manager\linux\selenium-manager' Or '%(ResolvedFileToPublish.RelativePath)' == 'selenium-manager\macos\selenium-manager'" />
+    </ItemGroup>
+  </Target>
 
 </Project>

@@ -6,8 +6,8 @@ namespace BAOCODETOOL.Strategies;
 
 public sealed class MM88Strategy : IRegistrationStrategy
 {
-    private const string TargetUrl = "http://gioithieu.mm88p.com/m/register?referralCode=mgr0794";
-    private const string BankSetupUrl = "https://gioithieu.mm88p.com/m/securityCenter/addBankCard?type=B";
+    private const string TargetUrl = "https://www.mm88o.com/register?referralCode=zfr8673&affiliateCode=gioithieu";
+    private const string BankSetupUrl = "https://www.mm88o.com/m/securityCenter/addBankCard?type=B";
 
     public bool ExecuteRegistration(
         IWebDriver driver,

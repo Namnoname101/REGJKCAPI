@@ -7,8 +7,8 @@ using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
 using OpenQA.Selenium.Support.UI;
 
-const string loginUrl = "https://gioithieu.rr3311.com/m/login";
-const string bankUrl = "https://gioithieu.rr3311.com/m/securityCenter/addBankCard?type=B";
+const string loginUrl = "https://www.rr3311.com/m/login";
+const string bankUrl = "https://www.rr3311.com/m/securityCenter/addBankCard?type=B";
 
 var successFile = args.Length > 0
     ? Path.GetFullPath(args[0])

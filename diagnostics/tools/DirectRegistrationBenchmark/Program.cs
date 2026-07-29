@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text.Json;
+using BAOCODETOOL.Configuration;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
 
@@ -20,10 +21,16 @@ var bankName = args
                    .FirstOrDefault(arg => arg.StartsWith("bank=", StringComparison.OrdinalIgnoreCase))
                    ?["bank=".Length..]
                ?? "VIETCOMBANK";
+var captchaSolverOptions = CreateCaptchaSolverOptions();
 
 if (runBotManagerPath)
 {
-    await RunBotManagerBenchmarkAsync(site, count, concurrency, bankName);
+    await RunBotManagerBenchmarkAsync(
+        site,
+        count,
+        concurrency,
+        bankName,
+        captchaSolverOptions);
     return;
 }
 
@@ -34,13 +41,16 @@ if (count == 1)
     var singleOutcome = await DirectRegistrationWorkflow.TryRegisterAsync(
         singleAccount,
         site,
-        CancellationToken.None);
+        CancellationToken.None,
+        captchaSolverOptions);
     singleStopwatch.Stop();
 
     Console.WriteLine($"site={site}");
     Console.WriteLine($"username={singleAccount.GetUsername(site)}");
     Console.WriteLine($"password={singleAccount.GetPassword(site)}");
     Console.WriteLine($"elapsedMs={singleStopwatch.ElapsedMilliseconds}");
+    Console.WriteLine($"captchaProvider={singleOutcome.VerificationProvider ?? string.Empty}");
+    Console.WriteLine($"captchaElapsedMs={singleOutcome.VerificationMs}");
     Console.WriteLine($"status={singleOutcome.Status}");
     Console.WriteLine($"message={singleOutcome.Message}");
     Console.WriteLine($"usernameConflict={singleOutcome.UsernameConflict}");
@@ -81,7 +91,8 @@ var tasks = Enumerable.Range(1, count)
             var outcome = await DirectRegistrationWorkflow.TryRegisterAsync(
                 account,
                 site,
-                CancellationToken.None);
+                CancellationToken.None,
+                captchaSolverOptions);
             DirectBankSetupOutcome? bankOutcome = null;
             if (runBankSetup && outcome.Status == DirectRegistrationStatus.Success)
             {
@@ -129,11 +140,12 @@ if (runBankSetup)
 }
 Console.WriteLine($"avgElapsedMs={(long)results.Average(result => result.ElapsedMs)}");
 Console.WriteLine($"maxElapsedMs={results.Max(result => result.ElapsedMs)}");
+Console.WriteLine($"avgCaptchaElapsedMs={(long)results.Average(result => result.Outcome.VerificationMs)}");
 
 foreach (var result in results.OrderBy(result => result.Index))
 {
     Console.WriteLine(
-        $"#{result.Index} username={result.Username} elapsedMs={result.ElapsedMs} status={result.Outcome.Status} message={result.Outcome.Message}" +
+        $"#{result.Index} username={result.Username} elapsedMs={result.ElapsedMs} captchaProvider={result.Outcome.VerificationProvider} captchaElapsedMs={result.Outcome.VerificationMs} status={result.Outcome.Status} message={result.Outcome.Message}" +
         (result.BankOutcome is null
             ? string.Empty
             : $" bankStatus={result.BankOutcome.Status} bankMessage={result.BankOutcome.Message}"));
@@ -168,7 +180,8 @@ static async Task RunBotManagerBenchmarkAsync(
     TargetSite site,
     int count,
     int concurrency,
-    string bankName)
+    string bankName,
+    CaptchaSolverOptions captchaSolverOptions)
 {
     var accounts = Enumerable
         .Range(1, count)
@@ -193,7 +206,8 @@ static async Task RunBotManagerBenchmarkAsync(
         maxThreads: concurrency,
         onSiteCompleted: () => Interlocked.Increment(ref completedCallbacks),
         enableDirectHttpRegistration: true,
-        maxConcurrentSitesPerAccount: 1);
+        maxConcurrentSitesPerAccount: 1,
+        captchaSolverOptions: captchaSolverOptions);
     stopwatch.Stop();
 
     var matchingSuccessLines = File.Exists(successPath)
@@ -225,6 +239,19 @@ static async Task RunBotManagerBenchmarkAsync(
         Console.WriteLine(
             $"username={item.Account.GetUsername(site)} siteStatus={item.SiteRun.Status} accountStatus={item.Account.Status} message={item.SiteRun.LogMessage}");
     }
+}
+
+static CaptchaSolverOptions CreateCaptchaSolverOptions()
+{
+    var apiKey = Environment.GetEnvironmentVariable("CaptchaSolver__ApiKey")
+                 ?? Environment.GetEnvironmentVariable("TWOCAPTCHA_API_KEY")
+                 ?? string.Empty;
+    return new CaptchaSolverOptions
+    {
+        Enabled = !string.IsNullOrWhiteSpace(apiKey),
+        ApiKey = apiKey,
+        UseRegistrationProxy = true
+    };
 }
 
 static void SelectOnlySite(AccountModel account, TargetSite selectedSite)

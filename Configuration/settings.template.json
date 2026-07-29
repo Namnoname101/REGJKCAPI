@@ -1,0 +1,51 @@
+{
+  "Telegram": {
+    "BotToken": "",
+    "AdminChatId": 0
+  },
+  "Hosting": {
+    "LocalUrl": "http://127.0.0.1:5000",
+    "WebhookUrl": "http://127.0.0.1:5001",
+    "OpenBrowser": true
+  },
+  "SePay": {
+    "Enabled": false,
+    "WebhookSecret": "",
+    "AllowedClockSkewSeconds": 300,
+    "BankName": "",
+    "AccountNumber": "",
+    "AccountHolder": "",
+    "TransferPrefix": "NAP"
+  },
+  "Automation": {
+    "MaxConcurrentJobs": 1,
+    "MaxBrowserThreadsPerJob": 10,
+    "MaxConcurrentSitesPerAccount": 1,
+    "MaxConcurrentBrowserStarts": 1,
+    "QueueCapacity": 100,
+    "EnablePrewarmedBrowserPool": false,
+    "PrewarmedBrowserPoolSize": 0,
+    "BrowserPoolMaxUsesPerSession": 20,
+    "MaxActiveBrowserSessions": 1,
+    "MaxCpuPercentBeforeThrottling": 75,
+    "EnableAdaptiveCpuThrottle": true,
+    "BrowserAdmissionStabilizationMs": 2000,
+    "CpuLowSamplesRequired": 3,
+    "Headless": false,
+    "EnableDirectHttpRegistration": true,
+    "EnableBrowserFallback": false
+  },
+  "CaptchaSolver": {
+    "Enabled": false,
+    "Provider": "TwoCaptcha",
+    "ApiKey": "",
+    "UseRegistrationProxy": true,
+    "TimeoutSeconds": 90,
+    "InitialPollingDelayMilliseconds": 2000,
+    "PollingIntervalMilliseconds": 3000
+  },
+  "ProxyVn": {
+    "ApiKey": "",
+    "MaxPurchaseQuantity": 100
+  }
+}

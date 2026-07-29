@@ -19,8 +19,8 @@ internal static class Program
 
     private static readonly SiteDefinition[] Sites =
     [
-        new("RR88", "http://gioithieu.rr3311.com/?referralCode=mrh6472"),
-        new("MM88", "http://gioithieu.mm88p.com/?referralCode=mgr0794"),
+        new("RR88", "https://www.rr3311.com/register?referralCode=hug0888&affiliateCode=gioithieu"),
+        new("MM88", "https://www.mm88o.com/register?referralCode=zfr8673&affiliateCode=gioithieu"),
         new("XX88", "http://gioithieu.xx88.fun/?referralCode=gql2969")
     ];
 

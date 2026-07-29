@@ -528,8 +528,8 @@ static async Task<object> RunDirectAccountAsync(
 static string GetRegistrationUrl(TargetSite site) =>
     site switch
     {
-        TargetSite.RR88 => "http://gioithieu.rr3311.com/m/register?referralCode=mrh6472",
-        TargetSite.MM88 => "http://gioithieu.mm88p.com/m/register?referralCode=mgr0794",
+        TargetSite.RR88 => "https://www.rr3311.com/register?referralCode=hug0888&affiliateCode=gioithieu",
+        TargetSite.MM88 => "https://www.mm88o.com/register?referralCode=zfr8673&affiliateCode=gioithieu",
         TargetSite.XX88 => "http://gioithieu.xx88.fun/m/register?referralCode=gql2969",
         TargetSite.GG88 => "https://www.gg88v.com/home/register?id=456510325",
         _ => throw new ArgumentOutOfRangeException(nameof(site), site, "No registration URL for discovery.")

@@ -5,6 +5,7 @@ using System.Collections.Specialized;
 using System.ComponentModel;
 using System.IO;
 using System.Linq;
+using BAOCODETOOL.Core;
 
 namespace BAOCODETOOL.Models;
 
@@ -69,7 +70,7 @@ public partial class AccountModel : ObservableObject
     private string _logMessage = "Profile ready.";
 
     public string ProfileFolderPath =>
-        Path.Combine(AppContext.BaseDirectory, "Profiles", ProfileId.ToString("N"));
+        Path.Combine(RuntimePaths.ProfilesDirectory, ProfileId.ToString("N"));
 
     public ObservableCollection<SiteRunModel> SiteRuns { get; }
 

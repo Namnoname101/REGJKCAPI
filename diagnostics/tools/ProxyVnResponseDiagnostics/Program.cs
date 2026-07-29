@@ -7,6 +7,14 @@ var readProxyResult = typeof(ProxyVnService).GetMethod(
     "ReadProxyResult",
     BindingFlags.NonPublic | BindingFlags.Static)
     ?? throw new InvalidOperationException("Proxy.vn response parser was not found.");
+var readProxyResults = typeof(ProxyVnService).GetMethod(
+    "ReadProxyResults",
+    BindingFlags.NonPublic | BindingFlags.Static)
+    ?? throw new InvalidOperationException("Proxy.vn batch response parser was not found.");
+var buildBuyUrl = typeof(ProxyVnService).GetMethod(
+    "BuildBuyUrl",
+    BindingFlags.NonPublic | BindingFlags.Static)
+    ?? throw new InvalidOperationException("Proxy.vn purchase URL builder was not found.");
 var resolveProxyCategory = typeof(ProxyVnService).GetMethod(
     "ResolveProxyCategory",
     BindingFlags.NonPublic | BindingFlags.Static)
@@ -75,6 +83,34 @@ AssertCandidates(
     """,
     ["192.0.2.50:10080:valid-user:valid-pass"]);
 
+AssertBatchCount(
+    """
+    [
+      {
+        "status": 100,
+        "idproxy": 101,
+        "proxy": "192.0.2.101:8080:batch-user:batch-pass"
+      },
+      {
+        "status": 100,
+        "idproxy": 102,
+        "proxy": "192.0.2.102:8080:batch-user:batch-pass"
+      },
+      {
+        "status": 201,
+        "comen": "Đã mua thành công nhưng không đủ số lượng"
+      }
+    ]
+    """,
+    2);
+
+var purchaseUrl = (string?)buildBuyUrl.Invoke(null, ["key", "VNPT", 3, "HTTP", 7])
+    ?? throw new InvalidOperationException("Proxy.vn purchase URL builder returned null.");
+if (!purchaseUrl.Contains("soluong=7", StringComparison.Ordinal))
+{
+    throw new InvalidOperationException($"Expected quantity in purchase URL, got '{purchaseUrl}'.");
+}
+
 AssertCategory("vnpt", "VNPT");
 AssertCategory("VIETTEL", "Viettel");
 AssertCategory("fpt", "FPT");
@@ -107,6 +143,20 @@ void AssertCandidates(string json, IReadOnlyList<string> expected)
     {
         throw new InvalidOperationException(
             $"Candidate mismatch. Expected=[{string.Join(", ", expected)}] Actual=[{string.Join(", ", actual)}]");
+    }
+}
+
+void AssertBatchCount(string json, int expectedCount)
+{
+    using var document = JsonDocument.Parse(json);
+    var parsed = readProxyResults.Invoke(null, [document.RootElement, json])
+        ?? throw new InvalidOperationException("Proxy.vn batch response parser returned null.");
+    var actualCount = (int?)parsed.GetType().GetProperty("Count")?.GetValue(parsed)
+        ?? throw new InvalidOperationException("Proxy.vn batch response count was not found.");
+    if (actualCount != expectedCount)
+    {
+        throw new InvalidOperationException(
+            $"Batch count mismatch. Expected={expectedCount} Actual={actualCount}");
     }
 }
 

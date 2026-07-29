@@ -25,8 +25,7 @@ internal static class BrowserFailureArtifactWriter
         {
             var timestamp = DateTimeOffset.UtcNow;
             var artifactDirectory = Path.Combine(
-                AppContext.BaseDirectory,
-                "diagnostics",
+                RuntimePaths.DiagnosticsDirectory,
                 "browser-failures");
             var stem = $"{timestamp:yyyyMMdd-HHmmssfff}-{account.ProfileId:N}-{siteRun.Site}";
 

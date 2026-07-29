@@ -45,8 +45,7 @@ public sealed class BrowserSessionPool : IBrowserSessionPool, IHostedService, ID
         });
 
         _poolRoot = Path.Combine(
-            AppContext.BaseDirectory,
-            "BrowserPool",
+            RuntimePaths.BrowserPoolDirectory,
             Guid.NewGuid().ToString("N"));
     }
 
@@ -607,8 +606,8 @@ public sealed class BrowserSessionPool : IBrowserSessionPool, IHostedService, ID
     private static string GetRegistrationOrigin(TargetSite site) =>
         site switch
         {
-            TargetSite.RR88 => "http://gioithieu.rr3311.com",
-            TargetSite.MM88 => "http://gioithieu.mm88p.com",
+            TargetSite.RR88 => "https://www.rr3311.com",
+            TargetSite.MM88 => "https://www.mm88o.com",
             TargetSite.XX88 => "http://gioithieu.xx88.fun",
             TargetSite.LLWIN => "https://llwin.app",
             TargetSite.GG88 => "https://www.gg88v.com",

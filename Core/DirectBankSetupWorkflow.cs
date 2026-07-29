@@ -979,13 +979,13 @@ public static class DirectBankSetupWorkflow
         {
             TargetSite.RR88 => new DirectBankSiteProfile(
                 site,
-                "https://gioithieu.rr3311.com",
-                "https://gioithieu.rr3311.com/m/securityCenter/addBankCard?type=B",
+                "https://www.rr3311.com",
+                "https://www.rr3311.com/m/securityCenter/addBankCard?type=B",
                 "rr88f4"),
             TargetSite.MM88 => new DirectBankSiteProfile(
                 site,
-                "https://gioithieu.mm88p.com",
-                "https://gioithieu.mm88p.com/m/securityCenter/addBankCard?type=B",
+                "https://www.mm88o.com",
+                "https://www.mm88o.com/m/securityCenter/addBankCard?type=B",
                 "mm88vndkf3"),
             TargetSite.XX88 => new DirectBankSiteProfile(
                 site,

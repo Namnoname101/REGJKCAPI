@@ -1806,6 +1806,7 @@ internal static partial class GgDirectWorkflow
     {
         var candidates = new[]
         {
+            RuntimePaths.GetResourcePath("Core", "gg_geetest_token.js"),
             Path.Combine(AppContext.BaseDirectory, "Core", "gg_geetest_token.js"),
             Path.Combine(AppContext.BaseDirectory, "gg_geetest_token.js"),
             Path.Combine(Directory.GetCurrentDirectory(), "Core", "gg_geetest_token.js")

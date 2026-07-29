@@ -10,7 +10,7 @@ public static class ResultWriter
 
     public static void AppendSuccess(AccountModel account, TargetSite site)
     {
-        var outputPath = Path.Combine(AppContext.BaseDirectory, "success.txt");
+        var outputPath = RuntimePaths.SuccessPath;
         var line = $"{site}|{account.GetUsername(site)}|{account.GetPassword(site)}|{account.FullName}|{account.AccountNumber}|{account.Level2Password}|";
 
         lock (SyncObj)
