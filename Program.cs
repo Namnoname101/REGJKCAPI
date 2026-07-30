@@ -56,10 +56,52 @@ if (!hasLocalAppSettings)
 
 builder.Configuration.AddEnvironmentVariables();
 
+// A terminal or Explorer process that was opened before settings were saved
+// keeps an old environment block on Windows. Read the persistent user values
+// directly as a fallback, then add process variables again so explicit launch
+// overrides keep the highest priority.
+var persistentUserConfiguration = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
+foreach (var environmentName in new[]
+         {
+             "Telegram__BotToken",
+             "Telegram__AdminChatId",
+             "SePay__Enabled",
+             "SePay__WebhookSecret",
+             "SePay__GatewayBaseUrl",
+             "SePay__GatewayAccessToken",
+             "SePay__BankName",
+             "SePay__AccountNumber",
+             "SePay__AccountHolder",
+             "SePay__TransferPrefix",
+             "SePay__QrBankCode"
+         })
+{
+    var persistentValue = Environment.GetEnvironmentVariable(
+        environmentName,
+        EnvironmentVariableTarget.User);
+    if (!string.IsNullOrWhiteSpace(persistentValue))
+    {
+        persistentUserConfiguration[
+            environmentName.Replace("__", ConfigurationPath.KeyDelimiter)] = persistentValue;
+    }
+}
+
+builder.Configuration.AddInMemoryCollection(persistentUserConfiguration);
+builder.Configuration.AddEnvironmentVariables();
+
+// OMOCaptcha documents OMO_API_KEY as the recommended environment variable.
+// Map it into the .NET options section while still supporting OmoCaptcha__ApiKey.
+var omoApiKey = builder.Configuration["OMO_API_KEY"];
+if (!string.IsNullOrWhiteSpace(omoApiKey))
+{
+    builder.Configuration["OmoCaptcha:Enabled"] = "true";
+    builder.Configuration["OmoCaptcha:ApiKey"] = omoApiKey;
+}
+
 var localListenUrl = builder.Configuration["Hosting:LocalUrl"] ?? "http://localhost:5000";
 var webhookListenUrl = builder.Configuration["Hosting:WebhookUrl"] ?? "http://localhost:5001";
 var openBrowser = !args.Any(argument => string.Equals(argument, "--no-browser", StringComparison.OrdinalIgnoreCase))
-                  && builder.Configuration.GetValue("Hosting:OpenBrowser", true);
+                  && builder.Configuration.GetValue("Hosting:OpenBrowser", false);
 builder.WebHost.UseUrls(localListenUrl, webhookListenUrl);
 
 builder.Logging.ClearProviders();
@@ -127,6 +169,51 @@ builder.Services
     .Validate(
         options => options.PollingIntervalMilliseconds is >= 1000 and <= 10000,
         "CaptchaSolver:PollingIntervalMilliseconds must be between 1000 and 10000.")
+    .Validate(
+        options => string.Equals(
+                       options.LocalGeeTestMode,
+                       CaptchaSolverOptions.BrowserFirstMode,
+                       StringComparison.OrdinalIgnoreCase)
+                   || string.Equals(
+                       options.LocalGeeTestMode,
+                       CaptchaSolverOptions.NodeFirstMode,
+                       StringComparison.OrdinalIgnoreCase),
+        "CaptchaSolver:LocalGeeTestMode must be BrowserFirst or NodeFirst.")
+    .Validate(
+        options => options.LocalBrowserMaxSessions is >= 1 and <= 16,
+        "CaptchaSolver:LocalBrowserMaxSessions must be between 1 and 16.")
+    .Validate(
+        options => options.LocalBrowserMaxUsesPerSession is >= 1 and <= 100,
+        "CaptchaSolver:LocalBrowserMaxUsesPerSession must be between 1 and 100.")
+    .Validate(
+        options => options.LocalBrowserIdleSeconds is >= 15 and <= 3600,
+        "CaptchaSolver:LocalBrowserIdleSeconds must be between 15 and 3600 seconds.")
+    .ValidateOnStart();
+
+builder.Services
+    .AddOptions<OmoCaptchaOptions>()
+    .Bind(builder.Configuration.GetSection(OmoCaptchaOptions.SectionName))
+    .Validate(
+        options => !options.Enabled
+                   || (!string.IsNullOrWhiteSpace(options.ApiKey)
+                       && options.ApiKey.Trim().Length is >= 10 and <= 80),
+        "OmoCaptcha:ApiKey must be between 10 and 80 characters when enabled.")
+    .Validate(
+        options => Uri.TryCreate(options.ApiBaseUrl, UriKind.Absolute, out var uri)
+                   && uri.Scheme == Uri.UriSchemeHttps,
+        "OmoCaptcha:ApiBaseUrl must be an absolute HTTPS URL.")
+    .Validate(
+        options => options.TimeoutSeconds is >= 15 and <= 300,
+        "OmoCaptcha:TimeoutSeconds must be between 15 and 300.")
+    .Validate(
+        options => options.InitialPollingDelayMilliseconds is >= 2000 and <= 10000,
+        "OmoCaptcha:InitialPollingDelayMilliseconds must be between 2000 and 10000.")
+    .Validate(
+        options => options.MaxPollingDelayMilliseconds
+                   is >= 2000 and <= 10000
+                   && options.MaxPollingDelayMilliseconds
+                   >= options.InitialPollingDelayMilliseconds,
+        "OmoCaptcha:MaxPollingDelayMilliseconds must be between the initial delay and 10000.")
     .ValidateOnStart();
 
 builder.Services
@@ -142,6 +229,25 @@ builder.Services
         "SePay:AccountHolder is required when SePay is enabled.")
     .Validate(options => !options.Enabled || !string.IsNullOrWhiteSpace(options.TransferPrefix),
         "SePay:TransferPrefix is required when SePay is enabled.")
+    .Validate(
+        options => !options.Enabled
+                   || !string.IsNullOrWhiteSpace(options.WebhookSecret)
+                   || (!string.IsNullOrWhiteSpace(options.GatewayBaseUrl)
+                       && !string.IsNullOrWhiteSpace(options.GatewayAccessToken)),
+        "Configure SePay:WebhookSecret for a direct webhook, or configure both SePay:GatewayBaseUrl and SePay:GatewayAccessToken.")
+    .Validate(options => options.QrExpirationMinutes is >= 1 and <= 1440,
+        "SePay:QrExpirationMinutes must be between 1 and 1440 minutes.")
+    .Validate(options => options.MinimumTopUpAmount > 0,
+        "SePay:MinimumTopUpAmount must be greater than zero.")
+    .Validate(options => options.MaximumTopUpAmount >= options.MinimumTopUpAmount,
+        "SePay:MaximumTopUpAmount must be greater than or equal to SePay:MinimumTopUpAmount.")
+    .Validate(options => options.GatewayPollingSeconds is >= 2 and <= 300,
+        "SePay:GatewayPollingSeconds must be between 2 and 300 seconds.")
+    .Validate(
+        options => string.IsNullOrWhiteSpace(options.GatewayBaseUrl)
+                   || (Uri.TryCreate(options.GatewayBaseUrl, UriKind.Absolute, out var gatewayUri)
+                       && gatewayUri.Scheme == Uri.UriSchemeHttps),
+        "SePay:GatewayBaseUrl must be an absolute HTTPS URL.")
     .ValidateOnStart();
 
 builder.Services.AddSingleton<ITelegramBotClient>(services =>
@@ -152,6 +258,8 @@ builder.Services.AddSingleton<ITelegramBotClient>(services =>
 
 builder.Services.AddDbContext<AppDbContext>();
 builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IImageCaptchaSolver, OmoImageCaptchaSolver>();
+builder.Services.AddSingleton<ISliderCaptchaSolver, OmoSliderCaptchaSolver>();
 builder.Services.ConfigureHttpJsonOptions(options =>
 {
     options.SerializerOptions.NumberHandling = System.Text.Json.Serialization.JsonNumberHandling.AllowReadingFromString;
@@ -159,12 +267,19 @@ builder.Services.ConfigureHttpJsonOptions(options =>
 builder.Services.AddScoped<IUserService, UserService>();
 builder.Services.AddScoped<ProxyVnService>();
 builder.Services.AddScoped<SePayWebhookService>();
+builder.Services.AddScoped<SePayPaymentRequestService>();
+builder.Services.AddScoped<SePayNotificationService>();
 
 builder.Services.AddSingleton<IProfileRepository, ProfileRepository>();
 builder.Services.AddSingleton<IJobQueueService, JobQueueService>();
 builder.Services.AddSingleton<BrowserSessionPool>();
 builder.Services.AddSingleton<IBrowserSessionPool>(services =>
     services.GetRequiredService<BrowserSessionPool>());
+builder.Services.AddSingleton<BrowserGeetestTokenPool>();
+builder.Services.AddSingleton<IGeetestBrowserTokenService>(services =>
+    services.GetRequiredService<BrowserGeetestTokenPool>());
+builder.Services.AddSingleton<IGgGeeGuardTokenService>(services =>
+    services.GetRequiredService<BrowserGeetestTokenPool>());
 builder.Services.AddSingleton<IBrowserConcurrencyGovernor, AdaptiveBrowserConcurrencyGovernor>();
 builder.Services.AddSingleton<IBrowserAutomationService, BrowserAutomationService>();
 builder.Services.AddSingleton<IRegistrationOrchestrator, RegistrationOrchestrator>();
@@ -173,10 +288,13 @@ builder.Services.AddSingleton<BotService>();
 
 builder.Services.AddSingleton<IHostedService>(services =>
     services.GetRequiredService<BrowserSessionPool>());
+builder.Services.AddSingleton<IHostedService>(services =>
+    services.GetRequiredService<BrowserGeetestTokenPool>());
 builder.Services.AddHostedService<ApplicationLifetimeLoggingService>();
 builder.Services.AddHostedService<AutomationStatusLoggingService>();
 builder.Services.AddHostedService<TelegramBotService>();
 builder.Services.AddHostedService<JobWorkerService>();
+builder.Services.AddHostedService<SePayGatewaySyncService>();
 builder.Services.AddSingleton(new LocalDashboardLauncherOptions(localListenUrl, openBrowser));
 builder.Services.AddHostedService<LocalDashboardLauncherService>();
 builder.Services.AddHostedService<SystemTrayIconService>();
@@ -208,8 +326,7 @@ app.Use(async (context, next) =>
 app.MapPost("/api/webhooks/sepay", async (
     HttpRequest request,
     SePayWebhookService sePay,
-    ITelegramBotClient bot,
-    IOptions<TelegramOptions> telegramOptions,
+    SePayNotificationService notifier,
     ILoggerFactory loggerFactory,
     CancellationToken cancellationToken) =>
 {
@@ -217,13 +334,14 @@ app.MapPost("/api/webhooks/sepay", async (
     if (request.ContentLength > maximumPayloadBytes)
         return Results.Json(new { success = false, message = "Payload is too large." }, statusCode: StatusCodes.Status413PayloadTooLarge);
 
-    string rawBody;
-    using (var reader = new StreamReader(request.Body, Encoding.UTF8, detectEncodingFromByteOrderMarks: false, leaveOpen: true))
+    byte[] rawBody;
+    await using (var bodyBuffer = new MemoryStream())
     {
-        rawBody = await reader.ReadToEndAsync(cancellationToken);
+        await request.Body.CopyToAsync(bodyBuffer, cancellationToken);
+        rawBody = bodyBuffer.ToArray();
     }
 
-    if (Encoding.UTF8.GetByteCount(rawBody) > maximumPayloadBytes)
+    if (rawBody.Length > maximumPayloadBytes)
         return Results.Json(new { success = false, message = "Payload is too large." }, statusCode: StatusCodes.Status413PayloadTooLarge);
 
     if (!sePay.IsConfigured)
@@ -263,43 +381,7 @@ app.MapPost("/api/webhooks/sepay", async (
         return Results.Json(new { success = false, message = "Webhook processing failed." }, statusCode: StatusCodes.Status500InternalServerError);
     }
 
-    if (result.Status == "Credited" && result.ChatId.HasValue)
-    {
-        try
-        {
-            await bot.SendMessage(
-                result.ChatId.Value,
-                $"✅ <b>NẠP TIỀN THÀNH CÔNG</b>\n━━━━━━━━━━━━━━━━━━━━\n" +
-                $"💵 Đã cộng: <b>{result.Amount:N0} Xu</b>\n" +
-                $"💰 Số dư mới: <b>{result.NewBalance:N0} Xu</b>\n" +
-                $"🔖 Mã giao dịch: <code>SEPAY:{result.TransactionId}</code>",
-                ParseMode.Html,
-                cancellationToken: cancellationToken);
-        }
-        catch (Exception exception)
-        {
-            loggerFactory.CreateLogger("SePayWebhook")
-                .LogWarning(exception, "Could not notify ChatId {ChatId} about SePay deposit.", result.ChatId);
-        }
-    }
-    else if (result.Status == "Ignored")
-    {
-        try
-        {
-            await bot.SendMessage(
-                telegramOptions.Value.AdminChatId,
-                $"⚠️ <b>SEPAY CHƯA CỘNG TIỀN</b>\n" +
-                $"Mã giao dịch: <code>{result.TransactionId}</code>\n" +
-                $"Lý do: {WebUtility.HtmlEncode(result.Message)}",
-                ParseMode.Html,
-                cancellationToken: cancellationToken);
-        }
-        catch (Exception exception)
-        {
-            loggerFactory.CreateLogger("SePayWebhook")
-                .LogWarning(exception, "Could not notify admin about unmatched SePay transaction {TransactionId}.", result.TransactionId);
-        }
-    }
+    await notifier.NotifyAsync(result, cancellationToken);
 
     return Results.Ok(new { success = true });
 });

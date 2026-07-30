@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
 using OpenQA.Selenium;
+using OpenQA.Selenium.Chromium;
 using OpenQA.Selenium.Chrome;
 
 var site = args.Length > 0 && Enum.TryParse<TargetSite>(args[0], ignoreCase: true, out var parsedSite)
@@ -56,19 +57,25 @@ var profilePath = Path.Combine(
     Guid.NewGuid().ToString("N"));
 
 var assetScan = string.Equals(
-    Environment.GetEnvironmentVariable("VIBECODE_GG_ASSET_SCAN"),
-    "1",
-    StringComparison.Ordinal);
-using var driver = DriverFactory.CreateDriver(
-    profilePath,
-    userAgent: null,
-    proxy: account.Proxy,
-    headless: assetScan,
-    site);
+        Environment.GetEnvironmentVariable("VIBECODE_LOBBY_ASSET_SCAN"),
+        "1",
+        StringComparison.Ordinal)
+    || string.Equals(
+        Environment.GetEnvironmentVariable("VIBECODE_GG_ASSET_SCAN"),
+        "1",
+        StringComparison.Ordinal);
+using var driver = site == TargetSite.LLWIN
+    ? CreateLlwinEdgeDriver(profilePath, account.Proxy)
+    : DriverFactory.CreateDriver(
+        profilePath,
+        userAgent: null,
+        proxy: account.Proxy,
+        headless: assetScan,
+        site);
 
-if (driver is ChromeDriver chromeDriver)
+if (driver is ChromiumDriver chromiumDriver)
 {
-    chromeDriver.ExecuteCdpCommand(
+    chromiumDriver.ExecuteCdpCommand(
         "Page.addScriptToEvaluateOnNewDocument",
         new Dictionary<string, object>
         {
@@ -81,7 +88,7 @@ driver.Navigate().GoToUrl(GetRegistrationUrl(site));
 Console.WriteLine($"DISCOVERY opened {site} in {stopwatch.Elapsed.TotalSeconds:0.000}s");
 
 var js = (IJavaScriptExecutor)driver;
-if (site == TargetSite.GG88 && assetScan)
+if (site is TargetSite.GG88 or TargetSite.LLWIN && assetScan)
 {
     var assetDeadline = DateTimeOffset.UtcNow.AddSeconds(15);
     while (DateTimeOffset.UtcNow < assetDeadline)
@@ -113,8 +120,25 @@ if (site == TargetSite.GG88 && assetScan)
             'formBody',
             'twoStepVerifyInfo',
             'withdrawPassword',
+            'withdraw_pass',
+            'confirmWithdrawPass',
+            'session_key',
+            'jwt_token',
+            'userkey',
+            'jwtToken',
+            'sessionKey',
+            'MD5',
             'paymentMethodId',
             'payBindCardV2'
+            ,'verifyWithdrawPass'
+            ,'modifyWithdrawPass'
+            ,'verifyWithdrawPassword'
+            ,'modifyWithdrawPassword'
+            ,'getUserBankCardList'
+            ,'Hre('
+            ,'Ure('
+            ,'rse('
+            ,'getPasswordAndVerify'
             ,'submitRechargeBank'
             ,'bankMatchTrigger'
             ,'cardNumber'
@@ -254,8 +278,8 @@ if (site == TargetSite.GG88 && assetScan)
     return;
 }
 
-var result = site == TargetSite.GG88
-    ? SubmitGgForm(driver, account, stopwatch)
+var result = site is TargetSite.GG88 or TargetSite.LLWIN
+    ? SubmitLobbyForm(driver, account, site, stopwatch)
     : js.ExecuteAsyncScript(
         FillAndSubmitScript(),
         account.GetUsername(site),
@@ -266,7 +290,8 @@ var result = site == TargetSite.GG88
         20_000);
 Console.WriteLine($"DISCOVERY submit result: {JsonSerializer.Serialize(result)}");
 
-var waitUntil = DateTimeOffset.UtcNow.AddSeconds(site == TargetSite.GG88 ? 8 : 25);
+var waitUntil = DateTimeOffset.UtcNow.AddSeconds(
+    site == TargetSite.LLWIN ? 20 : site == TargetSite.GG88 ? 8 : 25);
 while (DateTimeOffset.UtcNow < waitUntil)
 {
     var count = Convert.ToInt64(js.ExecuteScript("return (window.__vibeRequests || []).length;") ?? 0);
@@ -275,12 +300,12 @@ while (DateTimeOffset.UtcNow < waitUntil)
 
     var registrationRequestSeen = js.ExecuteScript(
         "return (window.__vibeRequests || []).some(r => /\\/api\\/member\\/(?:check\\/)?register/i.test(String(r.url || '')));") is true;
-    if (registrationRequestSeen)
+    if (registrationRequestSeen && site != TargetSite.LLWIN)
     {
         break;
     }
 
-    if (site != TargetSite.GG88
+    if (site is not TargetSite.GG88 and not TargetSite.LLWIN
         && (href.Contains("/home", StringComparison.OrdinalIgnoreCase)
         || href.Contains("/member", StringComparison.OrdinalIgnoreCase))
        )
@@ -334,21 +359,38 @@ var formStateJson = js.ExecuteScript(
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
             }).map(el => String(el.innerText || el.textContent || '').trim())
-            .filter(Boolean).slice(0, 30)
+            .filter(Boolean).slice(0, 30),
+        captchaNodes: Array.from(document.querySelectorAll(
+            'iframe, [id*="captcha" i], [class*="captcha" i], [id*="botion" i], [class*="botion" i], canvas'))
+            .map(el => ({
+                tag: el.tagName,
+                id: el.id || '',
+                className: String(el.className || ''),
+                src: el.src || '',
+                rect: [
+                    Math.round(el.getBoundingClientRect().x),
+                    Math.round(el.getBoundingClientRect().y),
+                    Math.round(el.getBoundingClientRect().width),
+                    Math.round(el.getBoundingClientRect().height)
+                ]
+            })).slice(0, 50)
     });
     """)?.ToString() ?? "{}";
 Console.WriteLine("DISCOVERY form state:");
 Console.WriteLine(formStateJson);
 if (driver is ITakesScreenshot screenshotDriver)
 {
-    var screenshotPath = Path.Combine(Path.GetTempPath(), "vibecode-gg-mobile.png");
+    var screenshotPath = Path.Combine(
+        Path.GetTempPath(),
+        $"vibecode-{site.ToString().ToLowerInvariant()}-mobile.png");
     screenshotDriver.GetScreenshot().SaveAsFile(screenshotPath);
     Console.WriteLine($"DISCOVERY screenshot: {screenshotPath}");
 }
 
-static object SubmitGgForm(
+static object SubmitLobbyForm(
     IWebDriver driver,
     AccountModel account,
+    TargetSite site,
     Stopwatch stopwatch)
 {
     var wait = new OpenQA.Selenium.Support.UI.WebDriverWait(
@@ -382,7 +424,7 @@ static object SubmitGgForm(
             .Where(input => input.Displayed && input.Enabled)
             .ToArray();
         return visible.Length >= 4 ? visible : null;
-    }) ?? throw new WebDriverTimeoutException("GG88 registration fields did not appear.");
+    }) ?? throw new WebDriverTimeoutException($"{site} registration fields did not appear.");
 
     static IWebElement FindByPlaceholder(
         IEnumerable<IWebElement> inputs,
@@ -398,9 +440,9 @@ static object SubmitGgForm(
 
     foreach (var (input, value) in new[]
              {
-                 (usernameInput, account.GetUsername(TargetSite.GG88)),
-                 (passwordInput, account.GetPassword(TargetSite.GG88)),
-                 (phoneInput, FormatPhone(TargetSite.GG88, account.PhoneNumber)),
+                  (usernameInput, account.GetUsername(site)),
+                  (passwordInput, account.GetPassword(site)),
+                  (phoneInput, FormatPhone(site, account.PhoneNumber)),
                  (nameInput, account.FullName.ToUpperInvariant())
              })
     {
@@ -438,16 +480,16 @@ static object SubmitGgForm(
             input.click();
         });
         """,
-        account.GetUsername(TargetSite.GG88),
-        account.GetPassword(TargetSite.GG88),
-        FormatPhone(TargetSite.GG88, account.PhoneNumber),
+        account.GetUsername(site),
+        account.GetPassword(site),
+        FormatPhone(site, account.PhoneNumber),
         account.FullName.ToUpperInvariant());
 
     var submit = wait.Until(browser => browser.FindElements(By.Id("insideRegisterSubmitClick"))
             .Where(button => button.Displayed && button.Enabled)
             .OrderByDescending(button => button.Location.Y)
             .FirstOrDefault())
-        ?? throw new WebDriverTimeoutException("GG88 visible registration submit button did not appear.");
+        ?? throw new WebDriverTimeoutException($"{site} visible registration submit button did not appear.");
     submit.Click();
 
     return new
@@ -456,6 +498,16 @@ static object SubmitGgForm(
         message = "selenium-clicked",
         elapsedMs = Math.Round(stopwatch.Elapsed.TotalMilliseconds)
     };
+}
+
+static IWebDriver CreateLlwinEdgeDriver(string profilePath, string proxy)
+{
+    if (!ProxyConfigurationParser.TryParse(proxy, out var parsedProxy, out var proxyError))
+    {
+        throw new FormatException(proxyError ?? "LLWIN proxy configuration is invalid.");
+    }
+
+    return DriverFactory.CreateEdgeDriver(profilePath, parsedProxy);
 }
 
 static AccountModel CreateRandomAccount(string proxy)
@@ -532,6 +584,7 @@ static string GetRegistrationUrl(TargetSite site) =>
         TargetSite.MM88 => "https://www.mm88o.com/register?referralCode=zfr8673&affiliateCode=gioithieu",
         TargetSite.XX88 => "http://gioithieu.xx88.fun/m/register?referralCode=gql2969",
         TargetSite.GG88 => "https://www.gg88v.com/home/register?id=456510325",
+        TargetSite.LLWIN => "https://llwin.app/home/register?id=924999213",
         _ => throw new ArgumentOutOfRangeException(nameof(site), site, "No registration URL for discovery.")
     };
 
@@ -539,7 +592,8 @@ static string FormatPhone(TargetSite site, string phoneNumber) =>
     site switch
     {
         TargetSite.XX88 => PhoneNumberFormatter.FormatTenDigitWithLeadingZero(phoneNumber),
-        TargetSite.RR88 or TargetSite.MM88 or TargetSite.GG88 => PhoneNumberFormatter.FormatNineDigitWithoutLeadingZero(phoneNumber),
+        TargetSite.RR88 or TargetSite.MM88 or TargetSite.GG88 or TargetSite.LLWIN =>
+            PhoneNumberFormatter.FormatNineDigitWithoutLeadingZero(phoneNumber),
         _ => PhoneNumberFormatter.FormatTenDigitWithLeadingZero(phoneNumber)
     };
 

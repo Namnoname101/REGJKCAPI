@@ -1,0 +1,16 @@
+.git
+.agents
+.vs
+.vscode
+artifacts
+bin
+obj
+diagnostics
+scratch_test
+**/bin
+**/obj
+*.db
+*.db-shm
+*.db-wal
+appsettings.json
+.env

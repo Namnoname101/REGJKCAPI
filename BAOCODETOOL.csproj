@@ -10,7 +10,7 @@
          publish a second loose copy next to the standalone executable. -->
     <EnableDefaultContentItems>false</EnableDefaultContentItems>
     <StaticWebAssetsEnabled>false</StaticWebAssetsEnabled>
-    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**;diagnostics\**;scratch_test\**</DefaultItemExcludes>
+    <DefaultItemExcludes>$(DefaultItemExcludes);artifacts\**;diagnostics\**;deploy\**;scratch_test\**</DefaultItemExcludes>
   </PropertyGroup>
 
   <PropertyGroup Condition="'$(Configuration)' == 'Release'">
@@ -57,9 +57,6 @@
     </EmbeddedResource>
     <EmbeddedResource Include="Core\geetest_token.js">
       <LogicalName>BAOCODETOOL.RuntimeAssets/Core/geetest_token.js</LogicalName>
-    </EmbeddedResource>
-    <EmbeddedResource Include="Core\gg_geetest_token.js">
-      <LogicalName>BAOCODETOOL.RuntimeAssets/Core/gg_geetest_token.js</LogicalName>
     </EmbeddedResource>
     <EmbeddedResource Include="Configuration\settings.template.json">
       <LogicalName>BAOCODETOOL.RuntimeAssets/settings.template.json</LogicalName>

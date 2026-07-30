@@ -8,13 +8,27 @@ public sealed class AutomationExecutionContext
 {
     private readonly ManualResetEventSlim _pauseEvent;
 
-    public AutomationExecutionContext(CancellationToken cancellationToken, ManualResetEventSlim pauseEvent)
+    public AutomationExecutionContext(
+        CancellationToken cancellationToken,
+        ManualResetEventSlim pauseEvent,
+        IImageCaptchaSolver? imageCaptchaSolver = null,
+        IGgGeeGuardTokenService? ggGeeGuardTokenService = null,
+        ISliderCaptchaSolver? sliderCaptchaSolver = null)
     {
         CancellationToken = cancellationToken;
         _pauseEvent = pauseEvent;
+        ImageCaptchaSolver = imageCaptchaSolver;
+        GgGeeGuardTokenService = ggGeeGuardTokenService;
+        SliderCaptchaSolver = sliderCaptchaSolver;
     }
 
     public CancellationToken CancellationToken { get; }
+
+    public IImageCaptchaSolver? ImageCaptchaSolver { get; }
+
+    public IGgGeeGuardTokenService? GgGeeGuardTokenService { get; }
+
+    public ISliderCaptchaSolver? SliderCaptchaSolver { get; }
 
     public void Checkpoint()
     {

@@ -39,15 +39,19 @@ var automationOptions = Options.Create(new AutomationOptions
     MaxBrowserThreadsPerJob = 1,
     MaxConcurrentSitesPerAccount = 1,
     MaxConcurrentBrowserStarts = 1,
-    EnablePrewarmedBrowserPool = true,
-    PrewarmedBrowserPoolSize = count,
+    // The benchmark measures the direct HTTP path. Do not open one visible
+    // fallback browser per account just by starting the diagnostic tool.
+    EnablePrewarmedBrowserPool = false,
+    PrewarmedBrowserPoolSize = 0,
     BrowserPoolMaxUsesPerSession = 5,
     MaxActiveBrowserSessions = maxActiveSessions,
     MaxCpuPercentBeforeThrottling = 75,
     EnableAdaptiveCpuThrottle = true,
-    Headless = false,
+    Headless = true,
+    EnableBrowserFallback = false,
     AllowDirectConnectionForTesting = true
 });
+var captchaSolverOptions = Options.Create(new CaptchaSolverOptions());
 
 using var loggerFactory = LoggerFactory.Create(builder =>
 {
@@ -65,11 +69,17 @@ using var pool = new BrowserSessionPool(
 using var governor = new AdaptiveBrowserConcurrencyGovernor(
     automationOptions,
     loggerFactory.CreateLogger<AdaptiveBrowserConcurrencyGovernor>());
+using var geetestPool = new BrowserGeetestTokenPool(
+    captchaSolverOptions,
+    loggerFactory.CreateLogger<BrowserGeetestTokenPool>());
 using var automation = new BrowserAutomationService(
     automationOptions,
+    captchaSolverOptions,
     new BenchmarkProfileRepository(),
     pool,
     governor,
+    geetestPool,
+    geetestPool,
     loggerFactory.CreateLogger<BrowserAutomationService>());
 
 var benchmarkStopwatch = Stopwatch.StartNew();
@@ -91,6 +101,7 @@ var statusHandler = new EventHandler<AutomationStatusChangedEventArgs>((_, event
 
 AutomationUi.StatusChanged += statusHandler;
 await pool.StartAsync(CancellationToken.None);
+await geetestPool.StartAsync(CancellationToken.None);
 
 try
 {
@@ -104,6 +115,7 @@ try
 finally
 {
     benchmarkStopwatch.Stop();
+    await geetestPool.StopAsync(CancellationToken.None);
     await pool.StopAsync(CancellationToken.None);
     AutomationUi.StatusChanged -= statusHandler;
 }

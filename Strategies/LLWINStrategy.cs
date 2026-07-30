@@ -29,10 +29,32 @@ public sealed class LLWINStrategy : ISiteAutomationStrategy
         SiteRunModel siteRun,
         AutomationExecutionContext executionContext)
     {
-        return LobbyMobileWorkflow.ExecuteBankSetup(
-            driver,
+        executionContext.Checkpoint();
+        AutomationUi.SetSiteStatus(
             account,
             siteRun,
-            executionContext);
+            logMessage: "Using the authenticated LLWIN session for direct bank setup...");
+
+        var outcome = LlwinBrowserBankWorkflow.SetupAsync(
+                driver,
+                account,
+                executionContext.CancellationToken)
+            .GetAwaiter()
+            .GetResult();
+        if (outcome.Status == DirectBankSetupStatus.Success)
+        {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                logMessage: outcome.Message);
+            return true;
+        }
+
+        AutomationUi.SetSiteStatus(
+            account,
+            siteRun,
+            AccountStatus.Failed,
+            outcome.Message);
+        return false;
     }
 }

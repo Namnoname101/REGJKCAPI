@@ -29,7 +29,8 @@ public static class RuntimePaths
         "Users",
         "Jobs",
         "Transactions",
-        "SePayWebhookTransactions"
+        "SePayWebhookTransactions",
+        "SePayPaymentRequests"
     ];
 
     private static readonly string RootDirectory = Path.Combine(
@@ -244,6 +245,8 @@ public static class RuntimePaths
         try
         {
             using var connection = OpenDatabase(databasePath, SqliteOpenMode.ReadOnly);
+            long users = 0;
+            long operationalRecords = 0;
             foreach (var table in MeaningfulDataTables)
             {
                 using var tableCheck = connection.CreateCommand();
@@ -256,14 +259,25 @@ public static class RuntimePaths
                 }
 
                 using var rowCheck = connection.CreateCommand();
-                rowCheck.CommandText = $"SELECT EXISTS(SELECT 1 FROM \"{table}\" LIMIT 1)";
-                if (Convert.ToInt64(rowCheck.ExecuteScalar()) != 0)
+                rowCheck.CommandText = $"SELECT COUNT(*) FROM \"{table}\"";
+                var rowCount = Convert.ToInt64(rowCheck.ExecuteScalar());
+                if (string.Equals(table, "Users", StringComparison.Ordinal))
                 {
-                    return DatabaseDataState.HasData;
+                    users = rowCount;
+                }
+                else
+                {
+                    operationalRecords += rowCount;
                 }
             }
 
-            return DatabaseDataState.Empty;
+            // A brand-new standalone host may create one administrator row
+            // before configuration validation stops startup. Treat that as an
+            // empty bootstrap database so the previous console database can
+            // still be imported on the next launch.
+            return operationalRecords > 0 || users > 1
+                ? DatabaseDataState.HasData
+                : DatabaseDataState.Empty;
         }
         catch
         {

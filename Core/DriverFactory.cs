@@ -1,5 +1,6 @@
 using OpenQA.Selenium;
 using OpenQA.Selenium.Chrome;
+using OpenQA.Selenium.Edge;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -10,6 +11,11 @@ namespace BAOCODETOOL.Core;
 
 public static class DriverFactory
 {
+    private const string MobileUserAgent =
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) " +
+        "AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.0 " +
+        "Mobile/15E148 Safari/604.1";
+
     public static IWebDriver CreateDriver(AccountModel account)
     {
         return CreateDriver(account, TargetSite.RR88);
@@ -37,6 +43,143 @@ public static class DriverFactory
             deleteProfileOnDispose: true);
     }
 
+    public static IWebDriver CreateEdgeDriver(
+        string profileFolderPath,
+        ProxyConfiguration? proxy,
+        bool deleteProfileOnDispose = true)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(profileFolderPath);
+        Directory.CreateDirectory(profileFolderPath);
+
+        var options = new EdgeOptions
+        {
+            BinaryLocation = EdgeDriverResolver.ResolveEdgeBinaryPath(),
+            PageLoadStrategy = PageLoadStrategy.None,
+            UnhandledPromptBehavior = UnhandledPromptBehavior.Accept
+        };
+        options.AddArgument("--headless=new");
+        options.AddArgument("--window-size=390,844");
+        options.AddArgument($"--user-data-dir={profileFolderPath}");
+        options.AddArgument($"--user-agent={MobileUserAgent}");
+        options.AddArgument("--disable-background-networking");
+        options.AddArgument("--disable-background-mode");
+        options.AddArgument("--disable-default-apps");
+        options.AddArgument("--disable-sync");
+        options.AddArgument("--disable-extensions");
+        options.AddArgument("--disable-component-update");
+        options.AddArgument("--disable-domain-reliability");
+        options.AddArgument("--disable-features=Translate,MediaRouter,OptimizationHints,site-per-process");
+        options.AddArgument("--disable-notifications");
+        options.AddArgument("--disable-popup-blocking");
+        options.AddArgument("--disable-print-preview");
+        options.AddArgument("--disable-logging");
+        options.AddArgument("--log-level=3");
+        options.AddArgument("--silent");
+        options.AddArgument("--mute-audio");
+        options.AddArgument("--no-first-run");
+        options.AddArgument("--no-default-browser-check");
+        options.AddArgument("--no-sandbox");
+        options.AddArgument("--disable-dev-shm-usage");
+        options.AddArgument("--disk-cache-size=1");
+        options.AddArgument("--media-cache-size=1");
+        options.AddExcludedArgument("enable-automation");
+        options.AddArgument("--disable-blink-features=AutomationControlled");
+        options.AddUserProfilePreference("profile.default_content_setting_values.notifications", 2);
+        options.AddUserProfilePreference("profile.default_content_setting_values.geolocation", 2);
+
+        var cleanupResources = new List<IDisposable>();
+        if (deleteProfileOnDispose)
+        {
+            cleanupResources.Add(new TemporaryProfileCleanup(profileFolderPath));
+        }
+        if (proxy is not null)
+        {
+            var proxyServer = proxy.ProxyServerArgument;
+            if (proxy.RequiresAuthentication)
+            {
+                var relay = new LocalAuthenticatedProxyRelay(proxy);
+                proxyServer = relay.LocalProxyServer;
+                cleanupResources.Add(relay);
+            }
+            options.AddArgument($"--proxy-server={proxyServer}");
+        }
+
+        var cleanupResource = cleanupResources.Count switch
+        {
+            0 => null,
+            1 => cleanupResources[0],
+            _ => new CleanupBundle(cleanupResources)
+        };
+
+        try
+        {
+            var service = EdgeDriverService.CreateDefaultService(
+                EdgeDriverResolver.ResolveDriverDirectory());
+            service.HideCommandPromptWindow = true;
+            service.SuppressInitialDiagnosticInformation = true;
+            var driver = new ManagedEdgeDriver(service, options, cleanupResource);
+            driver.Manage().Timeouts().PageLoad = TimeSpan.FromSeconds(20);
+            // Mobile lobby scripts have their own 20-second bounded form wait.
+            // Keep WebDriver's outer timeout above that boundary so it can return
+            // the diagnostic result instead of racing the in-page callback.
+            driver.Manage().Timeouts().AsynchronousJavaScript = TimeSpan.FromSeconds(45);
+            driver.Manage().Timeouts().ImplicitWait = TimeSpan.Zero;
+            driver.ExecuteCdpCommand(
+                "Network.enable",
+                new Dictionary<string, object>());
+            driver.ExecuteCdpCommand(
+                "Network.setBlockedURLs",
+                new Dictionary<string, object>
+                {
+                    ["urls"] = new[]
+                    {
+                        "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
+                        "*google-analytics.com/*", "*googletagmanager.com/*",
+                        "*doubleclick.net/*", "*facebook.net/tr/*"
+                    }
+                });
+            driver.ExecuteCdpCommand(
+                "Emulation.setDeviceMetricsOverride",
+                new Dictionary<string, object>
+                {
+                    ["width"] = 390,
+                    ["height"] = 844,
+                    ["deviceScaleFactor"] = 3,
+                    ["mobile"] = true,
+                    ["screenWidth"] = 390,
+                    ["screenHeight"] = 844,
+                    ["positionX"] = 0,
+                    ["positionY"] = 0,
+                    ["screenOrientation"] = new Dictionary<string, object>
+                    {
+                        ["type"] = "portraitPrimary",
+                        ["angle"] = 0
+                    }
+                });
+            driver.ExecuteCdpCommand(
+                "Emulation.setTouchEmulationEnabled",
+                new Dictionary<string, object>
+                {
+                    ["enabled"] = true,
+                    ["maxTouchPoints"] = 5
+                });
+            driver.ExecuteCdpCommand(
+                "Network.setUserAgentOverride",
+                new Dictionary<string, object>
+                {
+                    ["userAgent"] = MobileUserAgent,
+                    ["acceptLanguage"] = "vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+                    ["platform"] = "iPhone"
+                });
+            return driver;
+        }
+        catch
+        {
+            cleanupResource?.Dispose();
+            throw;
+        }
+    }
+
     public static IWebDriver CreateDriver(
         string profileFolderPath,
         string? userAgent,
@@ -45,7 +188,9 @@ public static class DriverFactory
         TargetSite? site = null,
         bool verifyProxy = true,
         bool deleteProfileOnDispose = false,
-        bool forceMobileEmulation = false)
+        bool forceMobileEmulation = false,
+        bool enablePerformanceLogging = false,
+        bool disableWebSecurity = false)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(profileFolderPath);
         Directory.CreateDirectory(profileFolderPath);
@@ -60,7 +205,9 @@ public static class DriverFactory
             userAgent,
             headless,
             site,
-            forceMobileEmulation);
+            forceMobileEmulation,
+            enablePerformanceLogging,
+            disableWebSecurity);
         var service = ChromeDriverService.CreateDefaultService();
         service.HideCommandPromptWindow = true;
         service.SuppressInitialDiagnosticInformation = true;
@@ -197,7 +344,9 @@ public static class DriverFactory
         string? userAgent,
         bool headless,
         TargetSite? site,
-        bool forceMobileEmulation)
+        bool forceMobileEmulation,
+        bool enablePerformanceLogging,
+        bool disableWebSecurity)
     {
         var useMobileSite = forceMobileEmulation
                             || site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88;
@@ -209,6 +358,14 @@ public static class DriverFactory
             PageLoadStrategy = PageLoadStrategy.None,
             UnhandledPromptBehavior = UnhandledPromptBehavior.Accept
         };
+        if (enablePerformanceLogging)
+        {
+            options.SetLoggingPreference(LogType.Performance, OpenQA.Selenium.LogLevel.All);
+        }
+        if (disableWebSecurity)
+        {
+            options.AddArgument("--disable-web-security");
+        }
         
         // Tắt chế độ tàng hình theo yêu cầu của user, hiện cửa sổ nhỏ
         options.AddArgument(useMobileSite

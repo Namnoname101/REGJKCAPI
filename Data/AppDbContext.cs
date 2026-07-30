@@ -54,6 +54,22 @@ public sealed class AppDbContext : DbContext
                 CREATE UNIQUE INDEX IF NOT EXISTS ""IX_SePayWebhookTransactions_SePayTransactionId""
                     ON ""SePayWebhookTransactions"" (""SePayTransactionId"");
 
+                CREATE TABLE IF NOT EXISTS ""SePayPaymentRequests"" (
+                    ""Id"" INTEGER NOT NULL CONSTRAINT ""PK_SePayPaymentRequests"" PRIMARY KEY AUTOINCREMENT,
+                    ""ChatId"" INTEGER NOT NULL,
+                    ""TransferCode"" TEXT NOT NULL,
+                    ""ExpectedAmount"" TEXT NOT NULL,
+                    ""Status"" TEXT NOT NULL,
+                    ""CreatedAt"" TEXT NOT NULL,
+                    ""ExpiresAt"" TEXT NOT NULL,
+                    ""PaidAt"" TEXT NULL,
+                    ""SePayTransactionId"" INTEGER NULL
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS ""IX_SePayPaymentRequests_TransferCode""
+                    ON ""SePayPaymentRequests"" (""TransferCode"");
+                CREATE UNIQUE INDEX IF NOT EXISTS ""IX_SePayPaymentRequests_SePayTransactionId""
+                    ON ""SePayPaymentRequests"" (""SePayTransactionId"");
+
                 CREATE TABLE IF NOT EXISTS ""ProxyPackages"" (
                     ""Id"" INTEGER NOT NULL CONSTRAINT ""PK_ProxyPackages"" PRIMARY KEY AUTOINCREMENT,
                     ""Name"" TEXT NOT NULL,
@@ -191,6 +207,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<Job> Jobs => Set<Job>();
     public DbSet<ProxyPackage> ProxyPackages => Set<ProxyPackage>();
     public DbSet<SePayWebhookTransaction> SePayWebhookTransactions => Set<SePayWebhookTransaction>();
+    public DbSet<SePayPaymentRequest> SePayPaymentRequests => Set<SePayPaymentRequest>();
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)
     {
@@ -246,6 +263,15 @@ public sealed class AppDbContext : DbContext
             entity.HasKey(e => e.Id);
             entity.HasIndex(e => e.SePayTransactionId).IsUnique();
             entity.Property(e => e.TransferAmount).HasPrecision(18, 4);
+        });
+
+        modelBuilder.Entity<SePayPaymentRequest>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.TransferCode).IsUnique();
+            entity.HasIndex(e => e.SePayTransactionId).IsUnique();
+            entity.HasIndex(e => e.ChatId);
+            entity.Property(e => e.ExpectedAmount).HasPrecision(18, 4);
         });
 
         modelBuilder.Entity<ProxyPackage>(entity =>

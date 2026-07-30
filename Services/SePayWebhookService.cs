@@ -32,7 +32,7 @@ public sealed partial class SePayWebhookService
         _options.Enabled && !string.IsNullOrWhiteSpace(_options.WebhookSecret);
 
     public bool VerifySignature(
-        string rawBody,
+        ReadOnlySpan<byte> rawBody,
         string? signature,
         string? timestampHeader,
         out string error)
@@ -59,7 +59,10 @@ public sealed partial class SePayWebhookService
             return false;
         }
 
-        var signedPayload = Encoding.UTF8.GetBytes($"{timestampHeader}.{rawBody}");
+        var timestampPrefix = Encoding.UTF8.GetBytes($"{timestampHeader}.");
+        var signedPayload = new byte[timestampPrefix.Length + rawBody.Length];
+        Buffer.BlockCopy(timestampPrefix, 0, signedPayload, 0, timestampPrefix.Length);
+        rawBody.CopyTo(signedPayload.AsSpan(timestampPrefix.Length));
         var secret = Encoding.UTF8.GetBytes(_options.WebhookSecret);
         var hash = HMACSHA256.HashData(secret, signedPayload);
         var expected = Encoding.ASCII.GetBytes($"sha256={Convert.ToHexString(hash).ToLowerInvariant()}");
@@ -113,9 +116,76 @@ public sealed partial class SePayWebhookService
         if (!string.Equals(payload.AccountNumber?.Trim(), _options.AccountNumber.Trim(), StringComparison.Ordinal))
             return await IgnoreAsync(receipt, "Ignored", "Bank account does not match the configured account.", transaction, cancellationToken);
 
+        var paymentRequest = await FindPaymentRequestAsync(payload, cancellationToken);
+        if (paymentRequest is not null)
+        {
+            return await ProcessPaymentRequestAsync(
+                receipt,
+                payload,
+                paymentRequest,
+                transaction,
+                cancellationToken);
+        }
+
         if (!TryExtractChatId(payload, out var chatId))
             return await IgnoreAsync(receipt, "Unmatched", "Transfer content does not contain a valid top-up code.", transaction, cancellationToken);
 
+        return await CreditAsync(receipt, payload, chatId, transaction, cancellationToken);
+    }
+
+    private async Task<SePayProcessingResult> ProcessPaymentRequestAsync(
+        SePayWebhookTransaction receipt,
+        SePayWebhookPayload payload,
+        SePayPaymentRequest paymentRequest,
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction,
+        CancellationToken cancellationToken)
+    {
+        if (!string.Equals(paymentRequest.Status, "Pending", StringComparison.Ordinal))
+        {
+            return await IgnoreAsync(
+                receipt,
+                "Ignored",
+                $"Payment request {paymentRequest.TransferCode} is {paymentRequest.Status}.",
+                transaction,
+                cancellationToken,
+                paymentRequest.ChatId);
+        }
+
+        if (paymentRequest.ExpiresAt <= DateTime.UtcNow)
+        {
+            paymentRequest.Status = "Expired";
+            return await IgnoreAsync(
+                receipt,
+                "Ignored",
+                $"Payment request {paymentRequest.TransferCode} has expired.",
+                transaction,
+                cancellationToken,
+                paymentRequest.ChatId);
+        }
+
+        if (paymentRequest.ExpectedAmount != payload.TransferAmount)
+        {
+            paymentRequest.Status = "AmountMismatch";
+            return await IgnoreAsync(
+                receipt,
+                "Ignored",
+                $"Payment request {paymentRequest.TransferCode} expects {paymentRequest.ExpectedAmount:N0} VND but received {payload.TransferAmount:N0} VND.",
+                transaction,
+                cancellationToken,
+                paymentRequest.ChatId);
+        }
+
+        return await CreditAsync(receipt, payload, paymentRequest.ChatId, transaction, cancellationToken, paymentRequest);
+    }
+
+    private async Task<SePayProcessingResult> CreditAsync(
+        SePayWebhookTransaction receipt,
+        SePayWebhookPayload payload,
+        long chatId,
+        Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction transaction,
+        CancellationToken cancellationToken,
+        SePayPaymentRequest? paymentRequest = null)
+    {
         var user = await _dbContext.Users.SingleOrDefaultAsync(x => x.ChatId == chatId, cancellationToken);
         if (user is null)
             return await IgnoreAsync(receipt, "Unmatched", $"No existing user for ChatId {chatId}.", transaction, cancellationToken, chatId);
@@ -125,6 +195,13 @@ public sealed partial class SePayWebhookService
         receipt.ChatId = chatId;
         receipt.Status = "Credited";
         receipt.StatusMessage = null;
+
+        if (paymentRequest is not null)
+        {
+            paymentRequest.Status = "Paid";
+            paymentRequest.PaidAt = DateTime.UtcNow;
+            paymentRequest.SePayTransactionId = payload.Id;
+        }
 
         _dbContext.Transactions.Add(new Transaction
         {
@@ -147,6 +224,29 @@ public sealed partial class SePayWebhookService
             user.Balance);
 
         return SePayProcessingResult.Credited(payload.Id, chatId, payload.TransferAmount, user.Balance);
+    }
+
+    private async Task<SePayPaymentRequest?> FindPaymentRequestAsync(
+        SePayWebhookPayload payload,
+        CancellationToken cancellationToken)
+    {
+        foreach (var candidate in new[] { payload.Code, payload.Content })
+        {
+            if (!SePayPaymentRequestService.TryExtractPaymentRequestCode(
+                    candidate,
+                    _options.TransferPrefix,
+                    out var transferCode))
+            {
+                continue;
+            }
+
+            var paymentRequest = await _dbContext.SePayPaymentRequests
+                .SingleOrDefaultAsync(request => request.TransferCode == transferCode, cancellationToken);
+            if (paymentRequest is not null)
+                return paymentRequest;
+        }
+
+        return null;
     }
 
     private async Task<SePayProcessingResult> IgnoreAsync(
@@ -174,7 +274,14 @@ public sealed partial class SePayWebhookService
     private bool TryExtractChatId(SePayWebhookPayload payload, out long chatId)
     {
         var candidates = new[] { payload.Code, payload.Content };
-        var escapedPrefix = Regex.Escape(_options.TransferPrefix.Trim());
+        var transferPrefix = SePayPaymentRequestService.NormalizeTransferPrefix(_options.TransferPrefix);
+        if (string.IsNullOrEmpty(transferPrefix))
+        {
+            chatId = 0;
+            return false;
+        }
+
+        var escapedPrefix = Regex.Escape(transferPrefix);
         var pattern = $@"(?<![A-Z0-9]){escapedPrefix}\s*(?<chatId>[0-9]{{5,20}})(?![0-9])";
 
         foreach (var candidate in candidates)

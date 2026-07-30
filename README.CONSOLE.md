@@ -47,7 +47,21 @@ An environment variable overrides the corresponding JSON value. For example:
 $env:Automation__MaxConcurrentJobs = '3'
 ```
 
-`MaxConcurrentBrowserStarts` limits only the expensive Chrome creation phase.
+Image captchas such as a distorted `Mã xác minh` image use OMOCaptcha's
+`ImageToTextTask`. This workspace currently carries the operator-provided key
+in both development and publish configuration. `OMO_API_KEY` remains available
+as a higher-priority override:
+
+```powershell
+$env:OMO_API_KEY = 'YOUR_OMO_API_KEY'
+```
+
+When the Selenium registration form contains a verification input beside an
+image or canvas, the worker captures only that element, polls OMOCaptcha with
+exponential backoff, fills `solution.text`, and then submits the form. Existing
+GeeTest handling remains separate.
+
+`MaxConcurrentBrowserStarts` limits only the expensive browser creation phase.
 Already-running sessions continue working while another session is starting, so
 one burst of new registrations cannot starve all existing tabs. Start with `1`
 or `2`, then increase only after measuring CPU/RAM on the deployment machine.
@@ -68,6 +82,27 @@ reported as a failed site and never starts Chrome. Keep
 off, the host does not prewarm or create Chrome sessions for Telegram jobs.
 Only enable the fallback switches together for an explicitly chosen legacy site
 that has no direct API profile.
+
+GG88 is a separate exception to the generic Chrome fallback. Its invisible
+GeeGuard token is produced by a small reusable Microsoft Edge headless pool in
+mobile emulation mode. The matching Edge WebDriver is resolved from the
+installed Edge version, downloaded once from Microsoft's official driver host,
+and cached under `%LOCALAPPDATA%\VibeCodeReg\data\drivers\edge`. This flow does
+not create a Google Chrome process. RR88, MM88, and XX88 remain on their direct
+HTTP paths; MM88 and XX88 send their image captcha to OMOCaptcha.
+
+LLWIN also runs without Google Chrome. It uses a dedicated Microsoft Edge
+headless mobile session, captures the rendered Botion puzzle, sends that image
+to OMOCaptcha as `GeetestSliderWebTask`, scales the returned X coordinate to the
+page's device-pixel ratio, and performs the drag. After registration, the same
+authenticated session is mapped onto the encrypted lobby API used by GG88 for
+withdraw-password setup and bank binding. LLWIN executions are serialized
+inside the process: three simultaneous sessions through one proxy were blocked
+before the slider, while the queued run completed three registration-and-bank
+jobs successfully.
+
+`Hosting:OpenBrowser` defaults to `false`. The dashboard remains available at
+`http://127.0.0.1:5000`, but starting the bot does not open a browser tab.
 
 Telegram-created accounts use a meaningful short username (a common human name combined with 5 or 6 random digits, e.g. `tuananh84920`, 10–12 characters total). If a site reports that the username already exists, the retry generates another username with the same format.
 
@@ -196,15 +231,22 @@ sách người dùng, kết quả, metrics) nằm trong `%LOCALAPPDATA%\VibeCode
 vậy có thể thay EXE bằng bản mới mà không mất dữ liệu. `appsettings.json` của
 source chỉ dùng cho phát triển và không được nhúng vào EXE phát hành.
 
-Sau khi host khởi động, trình duyệt mặc định tự mở dashboard local. Đóng tab
-trình duyệt không tắt bot; tắt cửa sổ console hoặc dùng `Ctrl+C` để dừng sạch.
+Khi nâng cấp từ bản console cũ, EXE tự tìm `vibecodereg.db` ở thư mục chạy cũ
+và thư mục dự án lân cận, rồi nhập database có dữ liệu vào LocalAppData. Nếu
+cần khôi phục, bản database LocalAppData trước khi nhập được giữ trong
+`data\migration-backups`.
+
+Sau khi host khởi động, dashboard local chạy tại `http://127.0.0.1:5000` nhưng
+không tự mở trình duyệt. Tắt cửa sổ console hoặc dùng `Ctrl+C` để dừng sạch.
 Một instance duy nhất được phép chạy để tránh Telegram long-polling conflict và
 tranh chấp SQLite; mở EXE lần hai chỉ mở dashboard của instance đang chạy.
 EXE cũng có icon ở khay hệ thống Windows: nhấp đúp để mở dashboard hoặc nhấp
 chuột phải và chọn **Dừng ứng dụng** để tắt sạch.
 
-Máy chạy luồng Telegram/web không cần cài .NET. Các luồng captcha/browser vẫn
-cần Google Chrome và, với các flow gọi script GeeTest, Node.js trong `PATH`.
+Máy chạy luồng Telegram/web không cần cài .NET. GG88 và LLWIN cần Microsoft Edge; driver
+đúng phiên bản được tải và lưu cache tự động. RR88, MM88 và XX88 không cần mở
+trình duyệt. Google Chrome chỉ cần khi chủ động bật browser fallback cho một
+site legacy chưa có direct flow.
 Trước khi phát hành, rotate mọi token/API key từng lưu trong source và chỉ lưu
 chúng trong `settings.json` hoặc biến môi trường của Windows.
 
@@ -220,7 +262,7 @@ chúng trong `settings.json` hoặc biến môi trường của Windows.
 7. `ResultSenderService` edits the progress message and sends the final Telegram
    result.
 
-Chrome profiles and proxy relays remain isolated per account/site. The service
+Legacy browser profiles and proxy relays remain isolated per account/site. The service
 does not reuse one browser between unrelated users because that would risk
 leaking cookies, local storage, proxy identity, or an authenticated session.
 

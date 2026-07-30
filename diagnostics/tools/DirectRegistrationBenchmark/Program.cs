@@ -3,6 +3,9 @@ using System.Text.Json;
 using BAOCODETOOL.Configuration;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
+using BAOCODETOOL.Services;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
 var site = args.Length > 0 && Enum.TryParse<TargetSite>(args[0], ignoreCase: true, out var parsedSite)
     ? parsedSite
@@ -22,6 +25,28 @@ var bankName = args
                    ?["bank=".Length..]
                ?? "VIETCOMBANK";
 var captchaSolverOptions = CreateCaptchaSolverOptions();
+using var loggerFactory = LoggerFactory.Create(builder =>
+    builder.AddSimpleConsole(options => options.SingleLine = true));
+var imageCaptchaSolver = new OmoImageCaptchaSolver(
+    new BenchmarkHttpClientFactory(),
+    Options.Create(CreateOmoCaptchaOptions()),
+    loggerFactory.CreateLogger<OmoImageCaptchaSolver>());
+var sliderCaptchaSolver = new OmoSliderCaptchaSolver(
+    new BenchmarkHttpClientFactory(),
+    Options.Create(CreateOmoCaptchaOptions()),
+    loggerFactory.CreateLogger<OmoSliderCaptchaSolver>());
+using var browserGeetestTokenPool = new BrowserGeetestTokenPool(
+    Options.Create(captchaSolverOptions),
+    loggerFactory.CreateLogger<BrowserGeetestTokenPool>());
+var allowBrowserGeetest = string.Equals(
+    Environment.GetEnvironmentVariable("VIBECODE_ALLOW_BROWSER_GEETEST"),
+    "1",
+    StringComparison.Ordinal);
+IGeetestBrowserTokenService? browserGeetestTokenService = allowBrowserGeetest
+    ? browserGeetestTokenPool
+    : null;
+IGgGeeGuardTokenService ggGeeGuardTokenService = browserGeetestTokenPool;
+await browserGeetestTokenPool.StartAsync(CancellationToken.None);
 
 if (runBotManagerPath)
 {
@@ -30,7 +55,11 @@ if (runBotManagerPath)
         count,
         concurrency,
         bankName,
-        captchaSolverOptions);
+        captchaSolverOptions,
+        browserGeetestTokenService,
+        imageCaptchaSolver,
+        ggGeeGuardTokenService,
+        sliderCaptchaSolver);
     return;
 }
 
@@ -42,7 +71,10 @@ if (count == 1)
         singleAccount,
         site,
         CancellationToken.None,
-        captchaSolverOptions);
+        captchaSolverOptions,
+        browserGeetestTokenService,
+        imageCaptchaSolver,
+        ggGeeGuardTokenService);
     singleStopwatch.Stop();
 
     Console.WriteLine($"site={site}");
@@ -92,7 +124,10 @@ var tasks = Enumerable.Range(1, count)
                 account,
                 site,
                 CancellationToken.None,
-                captchaSolverOptions);
+                captchaSolverOptions,
+                browserGeetestTokenService,
+                imageCaptchaSolver,
+                ggGeeGuardTokenService);
             DirectBankSetupOutcome? bankOutcome = null;
             if (runBankSetup && outcome.Status == DirectRegistrationStatus.Success)
             {
@@ -166,7 +201,7 @@ static AccountModel CreateAccount(int index, string bankName)
     Username = $"d{Random.Shared.Next(1_000_000, 9_999_999)}",
     Password = $"Dt{Random.Shared.Next(100000, 999999)}x",
     PhoneNumber = $"052{Random.Shared.Next(1_000_000, 9_999_999):D7}",
-    FullName = "NGUYEN VAN TEST",
+    FullName = "NGUYEN VAN AN",
     Level2Password = Random.Shared.Next(100000, 999999).ToString(),
     AccountNumber = $"000{Random.Shared.NextInt64(1_000_000_000, 9_999_999_999)}",
     BankName = bankName,
@@ -181,7 +216,11 @@ static async Task RunBotManagerBenchmarkAsync(
     int count,
     int concurrency,
     string bankName,
-    CaptchaSolverOptions captchaSolverOptions)
+    CaptchaSolverOptions captchaSolverOptions,
+    IGeetestBrowserTokenService? browserGeetestTokenService,
+    IImageCaptchaSolver imageCaptchaSolver,
+    IGgGeeGuardTokenService ggGeeGuardTokenService,
+    ISliderCaptchaSolver sliderCaptchaSolver)
 {
     var accounts = Enumerable
         .Range(1, count)
@@ -196,7 +235,7 @@ static async Task RunBotManagerBenchmarkAsync(
     var usernames = accounts
         .Select(account => account.GetUsername(site))
         .ToHashSet(StringComparer.OrdinalIgnoreCase);
-    var successPath = Path.Combine(AppContext.BaseDirectory, "success.txt");
+    var successPath = RuntimePaths.SuccessPath;
     var completedCallbacks = 0;
 
     var stopwatch = Stopwatch.StartNew();
@@ -207,7 +246,11 @@ static async Task RunBotManagerBenchmarkAsync(
         onSiteCompleted: () => Interlocked.Increment(ref completedCallbacks),
         enableDirectHttpRegistration: true,
         maxConcurrentSitesPerAccount: 1,
-        captchaSolverOptions: captchaSolverOptions);
+        captchaSolverOptions: captchaSolverOptions,
+        browserGeetestTokenService: browserGeetestTokenService,
+        imageCaptchaSolver: imageCaptchaSolver,
+        ggGeeGuardTokenService: ggGeeGuardTokenService,
+        sliderCaptchaSolver: sliderCaptchaSolver);
     stopwatch.Stop();
 
     var matchingSuccessLines = File.Exists(successPath)
@@ -250,9 +293,60 @@ static CaptchaSolverOptions CreateCaptchaSolverOptions()
     {
         Enabled = !string.IsNullOrWhiteSpace(apiKey),
         ApiKey = apiKey,
-        UseRegistrationProxy = true
+        UseRegistrationProxy = true,
+        LocalGeeTestMode = Environment.GetEnvironmentVariable("CaptchaSolver__LocalGeeTestMode")
+                          ?? CaptchaSolverOptions.NodeFirstMode,
+        LocalBrowserMaxSessions = ReadInt32Environment(
+            "CaptchaSolver__LocalBrowserMaxSessions",
+            fallback: 4),
+        LocalBrowserMaxUsesPerSession = ReadInt32Environment(
+            "CaptchaSolver__LocalBrowserMaxUsesPerSession",
+            fallback: 20),
+        LocalBrowserIdleSeconds = ReadInt32Environment(
+            "CaptchaSolver__LocalBrowserIdleSeconds",
+            fallback: 120)
     };
 }
+
+static OmoCaptchaOptions CreateOmoCaptchaOptions()
+{
+    var defaults = new OmoCaptchaOptions();
+    var apiKey = Environment.GetEnvironmentVariable("OMO_API_KEY")
+                 ?? Environment.GetEnvironmentVariable("OmoCaptcha__ApiKey")
+                 ?? ReadOmoApiKeyFromAppSettings();
+
+    if (string.IsNullOrWhiteSpace(apiKey))
+    {
+        apiKey = defaults.ApiKey;
+    }
+
+    return new OmoCaptchaOptions
+    {
+        Enabled = defaults.Enabled && !string.IsNullOrWhiteSpace(apiKey),
+        ApiKey = apiKey
+    };
+}
+
+static string ReadOmoApiKeyFromAppSettings()
+{
+    var path = Path.Combine(Directory.GetCurrentDirectory(), "appsettings.json");
+    if (!File.Exists(path))
+    {
+        return string.Empty;
+    }
+
+    using var document = JsonDocument.Parse(File.ReadAllText(path));
+    return document.RootElement.TryGetProperty("OmoCaptcha", out var section)
+           && section.TryGetProperty("ApiKey", out var apiKey)
+           && apiKey.ValueKind == JsonValueKind.String
+        ? apiKey.GetString() ?? string.Empty
+        : string.Empty;
+}
+
+static int ReadInt32Environment(string name, int fallback) =>
+    int.TryParse(Environment.GetEnvironmentVariable(name), out var value)
+        ? value
+        : fallback;
 
 static void SelectOnlySite(AccountModel account, TargetSite selectedSite)
 {
@@ -296,6 +390,11 @@ static string SummarizeResponse(string? value)
     {
         return $"non-json length={value.Length}";
     }
+}
+
+internal sealed class BenchmarkHttpClientFactory : IHttpClientFactory
+{
+    public HttpClient CreateClient(string name) => new();
 }
 
 internal sealed record BurstResult(

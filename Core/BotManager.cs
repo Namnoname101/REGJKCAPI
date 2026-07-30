@@ -13,6 +13,7 @@ namespace BAOCODETOOL.Core;
 
 public sealed class BotManager
 {
+    private static readonly SemaphoreSlim LlwinExecutionGate = new(1, 1);
     private readonly object _runLock = new();
     private readonly ManualResetEventSlim _pauseEvent = new(true);
     private CancellationTokenSource? _cts;
@@ -58,12 +59,21 @@ public sealed class BotManager
         int maxConcurrentSitesPerAccount = 1,
         IBrowserSessionPool? browserSessionPool = null,
         IBrowserConcurrencyGovernor? browserConcurrencyGovernor = null,
-        CaptchaSolverOptions? captchaSolverOptions = null)
+        CaptchaSolverOptions? captchaSolverOptions = null,
+        IGeetestBrowserTokenService? browserGeetestTokenService = null,
+        IImageCaptchaSolver? imageCaptchaSolver = null,
+        IGgGeeGuardTokenService? ggGeeGuardTokenService = null,
+        ISliderCaptchaSolver? sliderCaptchaSolver = null)
     {
         ArgumentNullException.ThrowIfNull(profiles);
 
         var cancellationTokenSource = BeginRun(cancellationToken);
-        var executionContext = new AutomationExecutionContext(cancellationTokenSource.Token, _pauseEvent);
+        var executionContext = new AutomationExecutionContext(
+            cancellationTokenSource.Token,
+            _pauseEvent,
+            imageCaptchaSolver,
+            ggGeeGuardTokenService,
+            sliderCaptchaSolver);
 
         try
         {
@@ -96,7 +106,8 @@ public sealed class BotManager
                 enableBrowserFallback,
                 browserSessionPool,
                 browserConcurrencyGovernor,
-                captchaSolverOptions));
+                captchaSolverOptions,
+                browserGeetestTokenService));
         }
 
         await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -119,7 +130,8 @@ private async Task RunAccountSitesConcurrentlyAsync(
     bool enableBrowserFallback,
     IBrowserSessionPool? browserSessionPool,
     IBrowserConcurrencyGovernor? browserConcurrencyGovernor,
-    CaptchaSolverOptions? captchaSolverOptions)
+    CaptchaSolverOptions? captchaSolverOptions,
+    IGeetestBrowserTokenService? browserGeetestTokenService)
 {
     var siteRuns = account.SiteRuns
         .Where(sr => sr.IsSelected && sr.Status != AccountStatus.Success && sr.Status != AccountStatus.Phase1_RegDone)
@@ -171,7 +183,8 @@ private async Task RunAccountSitesConcurrentlyAsync(
             enableBrowserFallback,
             browserSessionPool,
             browserConcurrencyGovernor,
-            captchaSolverOptions))
+            captchaSolverOptions,
+            browserGeetestTokenService))
         .ToArray();
 
     await Task.WhenAll(tasks).ConfigureAwait(false);
@@ -190,7 +203,8 @@ private async Task RunJobAsync(
     bool enableBrowserFallback,
     IBrowserSessionPool? browserSessionPool,
     IBrowserConcurrencyGovernor? browserConcurrencyGovernor,
-    CaptchaSolverOptions? captchaSolverOptions)
+    CaptchaSolverOptions? captchaSolverOptions,
+    IGeetestBrowserTokenService? browserGeetestTokenService)
 {
     var accountSlotAcquired = false;
     var slotAcquired = false;
@@ -215,7 +229,8 @@ private async Task RunJobAsync(
                     executionContext,
                     onSiteCompleted,
                     enableBrowserFallback,
-                    captchaSolverOptions)
+                    captchaSolverOptions,
+                    browserGeetestTokenService)
                 .ConfigureAwait(false))
             {
                 return;
@@ -227,7 +242,7 @@ private async Task RunJobAsync(
                     account,
                     siteRun,
                     AccountStatus.Failed,
-                    "Direct HTTP registration did not complete. Chrome fallback is disabled.");
+                    "Direct HTTP registration did not complete. Legacy browser fallback is disabled.");
                 NotifySiteCompleted(onSiteCompleted);
                 return;
             }
@@ -240,8 +255,8 @@ private async Task RunJobAsync(
                 siteRun,
                 AccountStatus.Failed,
                 enableDirectHttpRegistration
-                    ? $"Direct HTTP registration is not supported for {siteRun.Site}. Chrome fallback is disabled."
-                    : "Direct HTTP registration is disabled and Chrome fallback is disabled.");
+                    ? $"Direct HTTP registration is not supported for {siteRun.Site}. Legacy browser fallback is disabled."
+                    : "Direct HTTP registration is disabled and legacy browser fallback is disabled.");
             NotifySiteCompleted(onSiteCompleted);
             return;
         }
@@ -402,7 +417,8 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
     AutomationExecutionContext executionContext,
     Action? onSiteCompleted,
     bool enableBrowserFallback,
-    CaptchaSolverOptions? captchaSolverOptions)
+    CaptchaSolverOptions? captchaSolverOptions,
+    IGeetestBrowserTokenService? browserGeetestTokenService)
 {
     var metrics = new SitePerformanceMetrics();
     var totalStopwatch = Stopwatch.StartNew();
@@ -424,7 +440,10 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
                     account,
                     siteRun.Site,
                     executionContext.CancellationToken,
-                    captchaSolverOptions)
+                    captchaSolverOptions,
+                    browserGeetestTokenService,
+                    executionContext.ImageCaptchaSolver,
+                    executionContext.GgGeeGuardTokenService)
                 .ConfigureAwait(false);
             registrationStopwatch.Stop();
             metrics.RegistrationMs += registrationStopwatch.ElapsedMilliseconds;
@@ -491,7 +510,7 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
                         account,
                         siteRun,
                         AccountStatus.Failed,
-                        $"Direct HTTP registration unavailable: {outcome.Message} Chrome fallback is disabled.");
+                        $"Direct HTTP registration unavailable: {outcome.Message} Legacy browser fallback is disabled.");
                     handled = true;
                     return true;
                 }
@@ -570,12 +589,24 @@ private static void RunSingleSiteExecution(
     IBrowserSessionLease? pooledLease = null;
     IBrowserConcurrencyLease? concurrencyLease = null;
     IWebDriver? dedicatedDriver = null;
+    var llwinGateAcquired = false;
     var metrics = new SitePerformanceMetrics();
     var totalStopwatch = Stopwatch.StartNew();
 
     try
     {
         executionContext.Checkpoint();
+        if (siteRun.Site == TargetSite.LLWIN)
+        {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Running,
+                "Waiting for the LLWIN browser slot...");
+            LlwinExecutionGate.Wait(executionContext.CancellationToken);
+            llwinGateAcquired = true;
+        }
+
         var capacityStopwatch = Stopwatch.StartNew();
         if (browserConcurrencyGovernor is not null)
         {
@@ -664,8 +695,18 @@ private static void RunSingleSiteExecution(
             metrics.BrowserResetMs = browserResetStopwatch.ElapsedMilliseconds;
             totalStopwatch.Stop();
             metrics.TotalMs = totalStopwatch.ElapsedMilliseconds;
+            try
+            {
+                concurrencyLease?.Dispose();
+            }
+            finally
+            {
+                if (llwinGateAcquired)
+                {
+                    LlwinExecutionGate.Release();
+                }
+            }
             SitePerformanceMetricsWriter.Append(account, siteRun, metrics);
-            concurrencyLease?.Dispose();
 
             // Persistence/telemetry callbacks are deliberately outside the
             // browser result path. A transient disk/IO failure must not turn
@@ -696,10 +737,28 @@ private static IWebDriver CreateDriverWithStartupGate(
     {
         if (browserStartupGate is not null)
         {
-            // Chrome startup is CPU/IO heavy. Gate only this creation phase so
+            // Browser startup is CPU/IO heavy. Gate only this creation phase so
             // already-running browsers can execute in parallel.
             browserStartupGate.Wait(cancellationToken);
             startupSlotAcquired = true;
+        }
+
+        if (site == TargetSite.LLWIN)
+        {
+            if (!ProxyConfigurationParser.TryParse(
+                    account.Proxy,
+                    out var proxyConfiguration,
+                    out var proxyError))
+            {
+                throw new FormatException(proxyError ?? "LLWIN proxy configuration is invalid.");
+            }
+
+            var profileFolderPath = Path.Combine(
+                Path.GetTempPath(),
+                "BAOCODETOOL",
+                "EdgeProfiles",
+                Guid.NewGuid().ToString("N"));
+            return DriverFactory.CreateEdgeDriver(profileFolderPath, proxyConfiguration);
         }
 
         return DriverFactory.CreateDriver(account, site, headless);

@@ -26,6 +26,7 @@ try
         BankName = "MBBank",
         AccountHolder = "LE TAN",
         TransferPrefix = "NAP",
+        QrBankCode = "MB",
         AllowedClockSkewSeconds = 300
     };
 
@@ -62,10 +63,39 @@ try
     Equal("Ignored", (await service.ProcessAsync(wrongAccount, CancellationToken.None)).Status,
         "wrong bank account status");
 
+    var paymentRequestService = new SePayPaymentRequestService(db, Options.Create(sePayOptions));
+    Equal(true, paymentRequestService.TryParseAmount("50.000", out var parsedAmount), "formatted top-up amount is valid");
+    Equal(50_000L, parsedAmount, "formatted top-up amount value");
+    Equal(false, paymentRequestService.TryParseAmount("50.5k", out _), "fractional top-up amount is invalid");
+    var paymentQr = await paymentRequestService.CreateAsync(chatId, 60_000, CancellationToken.None);
+    Equal(true, paymentQr.QrImageUrl.Contains("amount=60000", StringComparison.Ordinal), "QR embeds requested amount");
+    Equal(true, paymentQr.QrImageUrl.Contains($"des={paymentQr.PaymentRequest.TransferCode}", StringComparison.Ordinal), "QR embeds transfer code");
+
+    var matchingQrPayment = NewPayload(1005, "in", 60_000, paymentQr.PaymentRequest.TransferCode);
+    Equal("Credited", (await service.ProcessAsync(matchingQrPayment, CancellationToken.None)).Status,
+        "matching QR payment status");
+    Equal("Paid", await db.SePayPaymentRequests
+        .Where(request => request.Id == paymentQr.PaymentRequest.Id)
+        .Select(request => request.Status)
+        .SingleAsync(), "matching QR payment request status");
+    Equal(110_000m, await db.Users.Where(x => x.ChatId == chatId).Select(x => x.Balance).SingleAsync(),
+        "matching QR payment increases balance");
+
+    var mismatchedPaymentQr = await paymentRequestService.CreateAsync(chatId, 70_000, CancellationToken.None);
+    Equal("Ignored", (await service.ProcessAsync(
+        NewPayload(1006, "in", 69_000, mismatchedPaymentQr.PaymentRequest.TransferCode),
+        CancellationToken.None)).Status, "mismatched QR payment status");
+    Equal("AmountMismatch", await db.SePayPaymentRequests
+        .Where(request => request.Id == mismatchedPaymentQr.PaymentRequest.Id)
+        .Select(request => request.Status)
+        .SingleAsync(), "mismatched QR payment request status");
+    Equal(110_000m, await db.Users.Where(x => x.ChatId == chatId).Select(x => x.Balance).SingleAsync(),
+        "mismatched QR payment must not change balance");
+
     var testPayload = NewPayload(0, "in", 50_000, $"NAP{chatId}");
     Equal("Test", (await service.ProcessAsync(testPayload, CancellationToken.None)).Status,
         "SePay test payload status");
-    Equal(4, await db.SePayWebhookTransactions.CountAsync(), "persisted real webhook count");
+    Equal(6, await db.SePayWebhookTransactions.CountAsync(), "persisted real webhook count");
 
     Console.WriteLine("SePay webhook diagnostics passed.");
 }
@@ -95,14 +125,15 @@ static void VerifySignatures(SePayWebhookService service, string secret)
 {
     const string body = "{\"id\":1001}";
     var timestamp = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+    var bodyBytes = Encoding.UTF8.GetBytes(body);
     var hash = HMACSHA256.HashData(
         Encoding.UTF8.GetBytes(secret),
-        Encoding.UTF8.GetBytes($"{timestamp}.{body}"));
+        Encoding.UTF8.GetBytes($"{timestamp}.").Concat(bodyBytes).ToArray());
     var signature = $"sha256={Convert.ToHexString(hash).ToLowerInvariant()}";
 
-    Equal(true, service.VerifySignature(body, signature, timestamp, out _), "valid HMAC signature");
-    Equal(false, service.VerifySignature(body + " ", signature, timestamp, out _), "modified payload signature");
-    Equal(false, service.VerifySignature(body, signature, "1", out _), "expired signature timestamp");
+    Equal(true, service.VerifySignature(bodyBytes, signature, timestamp, out _), "valid HMAC signature");
+    Equal(false, service.VerifySignature(Encoding.UTF8.GetBytes(body + " "), signature, timestamp, out _), "modified payload signature");
+    Equal(false, service.VerifySignature(bodyBytes, signature, "1", out _), "expired signature timestamp");
 }
 
 static void Equal<T>(T expected, T actual, string name)

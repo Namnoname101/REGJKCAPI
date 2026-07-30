@@ -52,6 +52,8 @@ public static class DirectRegistrationWorkflow
     private static readonly ConcurrentDictionary<TargetSite, GeetestSettingsCacheEntry> GeetestSettingsCache = new();
     private static readonly ConcurrentDictionary<TargetSite, SemaphoreSlim> GeetestSettingsGates = new();
     private static readonly TimeSpan GeetestSettingsCacheLifetime = TimeSpan.FromMinutes(10);
+    private static readonly JsonElement EmptyVerificationObject =
+        JsonSerializer.SerializeToElement(new Dictionary<string, object?>());
 
     public static bool IsSupported(TargetSite site) =>
         site == TargetSite.GG88 || GetProfile(site) is not null;
@@ -60,13 +62,19 @@ public static class DirectRegistrationWorkflow
         AccountModel account,
         TargetSite site,
         CancellationToken cancellationToken,
-        CaptchaSolverOptions? captchaSolverOptions = null)
+        CaptchaSolverOptions? captchaSolverOptions = null,
+        IGeetestBrowserTokenService? browserGeetestTokenService = null,
+        IImageCaptchaSolver? imageCaptchaSolver = null,
+        IGgGeeGuardTokenService? ggGeeGuardTokenService = null)
     {
         ArgumentNullException.ThrowIfNull(account);
 
         if (site == TargetSite.GG88)
         {
-            return await GgDirectWorkflow.RegisterAsync(account, cancellationToken)
+            return await GgDirectWorkflow.RegisterAsync(
+                    account,
+                    ggGeeGuardTokenService,
+                    cancellationToken)
                 .ConfigureAwait(false);
         }
 
@@ -118,12 +126,17 @@ public static class DirectRegistrationWorkflow
 
             ConfigureDefaultHeaders(httpClient, profile);
 
-            var geetestTask = GetGeetestValidateV4Async(
-                httpClient,
-                profile,
-                proxyConfiguration,
-                captchaSolverOptions,
-                cancellationToken);
+            Task<GeetestTokenResult?>? verificationTask = null;
+            if (profile.UsesGeetestCaptcha)
+            {
+                verificationTask = GetGeetestValidateV4Async(
+                    httpClient,
+                    profile,
+                    proxyConfiguration,
+                    captchaSolverOptions,
+                    browserGeetestTokenService,
+                    cancellationToken);
+            }
 
             await WarmUpSessionAsync(httpClient, profile, cancellationToken)
                 .ConfigureAwait(false);
@@ -137,12 +150,26 @@ public static class DirectRegistrationWorkflow
                     "Direct HTTP could not fetch RSA key.");
             }
 
-            var geetest = await geetestTask.ConfigureAwait(false);
-            if (geetest is null)
+            var imageVerificationTask = profile.UsesImageCaptcha
+                ? await GetImageCaptchaAsync(
+                        httpClient,
+                        imageCaptchaSolver,
+                        cancellationToken)
+                    .ConfigureAwait(false)
+                : null;
+            var geetestVerification = verificationTask is null
+                ? null
+                : await verificationTask.ConfigureAwait(false);
+            var imageVerification = imageVerificationTask;
+            var verification = MergeVerification(
+                profile,
+                geetestVerification,
+                imageVerification);
+            if (verification is null)
             {
                 return new DirectRegistrationOutcome(
                     DirectRegistrationStatus.FallbackToBrowser,
-                    "Direct HTTP could not solve GeeTest token.");
+                    "Direct HTTP could not solve every required registration verification.");
             }
 
             var registerResponse = await SendRegisterRequestAsync(
@@ -150,23 +177,27 @@ public static class DirectRegistrationWorkflow
                     account,
                     profile,
                     rsaKey,
-                    geetest.Value,
+                    verification,
                     cancellationToken)
                 .ConfigureAwait(false);
 
             if ((profile.Site is TargetSite.MM88 or TargetSite.XX88)
                 && IsGeetestRejected(registerResponse.ResponseText))
             {
-                registerResponse = await RetryCaptchaVerificationAsync(
+                var retry = await RetryCaptchaVerificationAsync(
                         httpClient,
                         account,
                         profile,
                         rsaKey,
-                        geetest.CaptchaId,
+                        verification,
                         proxyConfiguration,
                         registerResponse,
+                        browserGeetestTokenService,
+                        imageCaptchaSolver,
                         cancellationToken)
                     .ConfigureAwait(false);
+                registerResponse = retry.Response;
+                verification = retry.Verification;
             }
 
             if (!registerResponse.IsSuccessStatusCode)
@@ -178,7 +209,7 @@ public static class DirectRegistrationWorkflow
                 {
                     return AttachVerification(
                         AttachCookies(rejectedOutcome, cookies),
-                        geetest);
+                        verification);
                 }
 
                 return AttachVerification(
@@ -186,14 +217,14 @@ public static class DirectRegistrationWorkflow
                         DirectRegistrationStatus.FallbackToBrowser,
                         $"Direct HTTP register returned {(int)registerResponse.StatusCode}.",
                         RawResponse: registerResponse.ResponseText),
-                    geetest);
+                    verification);
             }
 
             return AttachVerification(
                 AttachCookies(
                     ParseRegisterResponse(registerResponse.ResponseText, profile),
                     cookies),
-                geetest);
+                verification);
         }
         catch (OperationCanceledException)
         {
@@ -212,10 +243,10 @@ public static class DirectRegistrationWorkflow
         AccountModel account,
         DirectRegistrationSiteProfile profile,
         string rsaKey,
-        JsonElement geetestValidateV4,
+        GeetestTokenResult verification,
         CancellationToken cancellationToken)
     {
-        var payload = BuildPayload(account, profile, geetestValidateV4);
+        var payload = BuildPayload(account, profile, verification);
         var payloadJson = JsonSerializer.Serialize(payload, JsonOptions);
         var encrypted = DirectRegistrationCrypto.Encrypt(payloadJson, rsaKey);
 
@@ -256,17 +287,61 @@ public static class DirectRegistrationWorkflow
     // Keep verification recovery deliberately bounded: request one fresh
     // GeeTest token and, if needed, one browser-assisted token. Do not use
     // this path for connection/time-out errors, which may be ambiguous.
-    private static async Task<RegisterHttpResponse> RetryCaptchaVerificationAsync(
+    private static async Task<RegistrationRetryResult> RetryCaptchaVerificationAsync(
         HttpClient httpClient,
         AccountModel account,
         DirectRegistrationSiteProfile profile,
         string rsaKey,
-        string initialCaptchaId,
+        GeetestTokenResult initialToken,
         ProxyConfiguration? proxyConfiguration,
         RegisterHttpResponse rejectedResponse,
+        IGeetestBrowserTokenService? browserGeetestTokenService,
+        IImageCaptchaSolver? imageCaptchaSolver,
         CancellationToken cancellationToken)
     {
-        var activeCaptchaId = initialCaptchaId;
+        if (profile.UsesImageCaptcha)
+        {
+            var refreshedImage = await GetImageCaptchaAsync(
+                    httpClient,
+                    imageCaptchaSolver,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            GeetestTokenResult? refreshedGeetest = null;
+            if (profile.UsesGeetestCaptcha)
+            {
+                refreshedGeetest = await GetGeetestValidateV4Async(
+                        httpClient,
+                        profile,
+                        proxyConfiguration,
+                        captchaSolverOptions: null,
+                        browserGeetestTokenService,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+            }
+
+            var refreshedVerification = MergeVerification(
+                profile,
+                refreshedGeetest,
+                refreshedImage);
+            if (refreshedVerification is null)
+            {
+                return new RegistrationRetryResult(rejectedResponse, initialToken);
+            }
+
+            var refreshedResponse = await SendRegisterRequestAsync(
+                    httpClient,
+                    account,
+                    profile,
+                    rsaKey,
+                    refreshedVerification,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            return new RegistrationRetryResult(refreshedResponse, refreshedVerification);
+        }
+
+        var activeCaptchaId = initialToken.CaptchaId;
+        var verificationElapsedMs = initialToken.ElapsedMilliseconds;
+        var finalToken = initialToken;
         var refreshedCaptchaId = await ResolveGeetestCaptchaIdAsync(
                 httpClient,
                 profile,
@@ -281,51 +356,198 @@ public static class DirectRegistrationWorkflow
         // A captcha ID can remain unchanged while each generated token is
         // single-use. Always request a fresh token, even when the ID did not
         // change in the live settings response.
+        var freshStopwatch = Stopwatch.StartNew();
         var freshToken = await GetGeetestValidateV4ForCaptchaIdAsync(
                 profile,
                 activeCaptchaId,
                 proxyConfiguration,
                 cancellationToken)
             .ConfigureAwait(false);
+        freshStopwatch.Stop();
+        verificationElapsedMs += freshStopwatch.ElapsedMilliseconds;
         if (freshToken is not null)
         {
+            finalToken = new GeetestTokenResult(
+                activeCaptchaId,
+                freshToken.Value,
+                "InternalGeeTestRetry",
+                verificationElapsedMs);
             rejectedResponse = await SendRegisterRequestAsync(
                     httpClient,
                     account,
                     profile,
                     rsaKey,
-                    freshToken.Value,
+                    finalToken,
                     cancellationToken)
                 .ConfigureAwait(false);
         }
 
         if (!IsGeetestRejected(rejectedResponse.ResponseText))
         {
-            return rejectedResponse;
+            return new RegistrationRetryResult(rejectedResponse, finalToken);
         }
 
-        // Keep the browser-assisted token as a bounded last resort. This is
-        // intentionally independent from the full browser-workflow setting:
-        // it only obtains a new GeeTest token for the same direct request.
-        var browserToken = await GetBrowserGeetestValidateV4Async(
-                profile,
-                activeCaptchaId,
-                proxyConfiguration,
+        // Browser-assisted verification is strictly opt-in. A null service
+        // means the caller selected an HTTP/Node-only execution path.
+        if (browserGeetestTokenService is null)
+        {
+            return new RegistrationRetryResult(
+                rejectedResponse,
+                finalToken with { ElapsedMilliseconds = verificationElapsedMs });
+        }
+
+        var browserStopwatch = Stopwatch.StartNew();
+        var localBrowserResult = await browserGeetestTokenService.GetTokenAsync(
+                new BrowserGeetestTokenRequest(
+                    profile.Site,
+                    profile.RegistrationUrl,
+                    activeCaptchaId,
+                    proxyConfiguration,
+                    profile.GeetestSdkCdn,
+                    profile.GeetestSdkVersion),
                 cancellationToken)
             .ConfigureAwait(false);
+        var browserToken = localBrowserResult?.Value;
+        browserStopwatch.Stop();
+        verificationElapsedMs += localBrowserResult?.ElapsedMilliseconds
+                                 ?? browserStopwatch.ElapsedMilliseconds;
+
         if (browserToken is null)
         {
-            return rejectedResponse;
+            return new RegistrationRetryResult(
+                rejectedResponse,
+                finalToken with { ElapsedMilliseconds = verificationElapsedMs });
         }
 
-        return await SendRegisterRequestAsync(
+        finalToken = new GeetestTokenResult(
+            activeCaptchaId,
+            browserToken.Value,
+            localBrowserResult!.ReusedBrowser
+                ? "LocalBrowserPool"
+                : "LocalBrowserGeeTest",
+            verificationElapsedMs);
+        rejectedResponse = await SendRegisterRequestAsync(
                 httpClient,
                 account,
                 profile,
                 rsaKey,
-                browserToken.Value,
+                finalToken,
                 cancellationToken)
             .ConfigureAwait(false);
+        return new RegistrationRetryResult(rejectedResponse, finalToken);
+    }
+
+    private static GeetestTokenResult? MergeVerification(
+        DirectRegistrationSiteProfile profile,
+        GeetestTokenResult? geetest,
+        GeetestTokenResult? image)
+    {
+        if (profile.UsesGeetestCaptcha && geetest is null
+            || profile.UsesImageCaptcha && image is null)
+        {
+            return null;
+        }
+
+        if (geetest is null)
+        {
+            return image;
+        }
+
+        if (image is null)
+        {
+            return geetest;
+        }
+
+        return new GeetestTokenResult(
+            geetest.CaptchaId,
+            geetest.Value,
+            $"{geetest.Provider}+{image.Provider}",
+            Math.Max(geetest.ElapsedMilliseconds, image.ElapsedMilliseconds),
+            image.ImageCaptchaText);
+    }
+
+    private static async Task<GeetestTokenResult?> GetImageCaptchaAsync(
+        HttpClient httpClient,
+        IImageCaptchaSolver? imageCaptchaSolver,
+        CancellationToken cancellationToken)
+    {
+        if (imageCaptchaSolver?.IsConfigured != true)
+        {
+            return null;
+        }
+
+        var stopwatch = Stopwatch.StartNew();
+        using var request = new HttpRequestMessage(HttpMethod.Get, "/wps/captcha");
+        request.Headers.TryAddWithoutValidation("ModuleId", "CAPTCHA3");
+        using var response = await httpClient.SendAsync(request, cancellationToken)
+            .ConfigureAwait(false);
+        var responseText = await response.Content.ReadAsStringAsync(cancellationToken)
+            .ConfigureAwait(false);
+        if (!response.IsSuccessStatusCode)
+        {
+            return null;
+        }
+
+        using var document = JsonDocument.Parse(responseText);
+        var root = document.RootElement;
+        if (!root.TryGetProperty("success", out var success)
+            || success.ValueKind != JsonValueKind.True
+            || !root.TryGetProperty("value", out var value)
+            || value.ValueKind != JsonValueKind.String
+            || string.IsNullOrWhiteSpace(value.GetString()))
+        {
+            return null;
+        }
+
+#if DEBUG
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("VIBECODE_CAPTCHA_DIAGNOSTICS"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            var diagnosticDirectory = Path.Combine(Path.GetTempPath(), "VibecodeCaptchaDiagnostics");
+            Directory.CreateDirectory(diagnosticDirectory);
+            var diagnosticPath = Path.Combine(
+                diagnosticDirectory,
+                $"captcha-{DateTimeOffset.UtcNow:yyyyMMddHHmmssfff}-{Guid.NewGuid():N}.png");
+            await File.WriteAllBytesAsync(
+                    diagnosticPath,
+                    Convert.FromBase64String(value.GetString()!),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            Console.WriteLine($"captchaDiagnosticImage={diagnosticPath}");
+        }
+#endif
+
+        var solveResult = await imageCaptchaSolver.SolveAsync(
+                value.GetString()!,
+                cancellationToken)
+            .ConfigureAwait(false);
+        stopwatch.Stop();
+        if (!solveResult.IsSuccess)
+        {
+            return null;
+        }
+
+        var captchaText = new string(
+            solveResult.Text.Where(char.IsLetterOrDigit).ToArray());
+#if DEBUG
+        if (string.Equals(
+                Environment.GetEnvironmentVariable("VIBECODE_CAPTCHA_DIAGNOSTICS"),
+                "1",
+                StringComparison.Ordinal))
+        {
+            Console.WriteLine($"captchaDiagnosticSolution={captchaText}");
+        }
+#endif
+        return string.IsNullOrWhiteSpace(captchaText)
+            ? null
+            : new GeetestTokenResult(
+                "image",
+                EmptyVerificationObject,
+                "OmoImageCaptcha",
+                stopwatch.ElapsedMilliseconds,
+                captchaText);
     }
 
     private static bool IsGeetestRejected(string responseText)
@@ -551,6 +773,7 @@ public static class DirectRegistrationWorkflow
         DirectRegistrationSiteProfile profile,
         ProxyConfiguration? proxyConfiguration,
         CaptchaSolverOptions? captchaSolverOptions,
+        IGeetestBrowserTokenService? browserGeetestTokenService,
         CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
@@ -583,6 +806,34 @@ public static class DirectRegistrationWorkflow
             }
         }
 
+        if (ShouldUseLocalBrowserFirst(
+                profile,
+                captchaSolverOptions,
+                browserGeetestTokenService))
+        {
+            var browserToken = await browserGeetestTokenService!.GetTokenAsync(
+                    new BrowserGeetestTokenRequest(
+                        profile.Site,
+                        profile.RegistrationUrl,
+                        captchaId,
+                        proxyConfiguration,
+                        profile.GeetestSdkCdn,
+                        profile.GeetestSdkVersion),
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (browserToken is not null)
+            {
+                stopwatch.Stop();
+                return new GeetestTokenResult(
+                    captchaId,
+                    browserToken.Value,
+                    browserToken.ReusedBrowser
+                        ? "LocalBrowserPool"
+                        : "LocalBrowserGeeTest",
+                    stopwatch.ElapsedMilliseconds);
+            }
+        }
+
         token ??= await GetGeetestValidateV4ForCaptchaIdAsync(
                     profile,
                     captchaId,
@@ -598,6 +849,14 @@ public static class DirectRegistrationWorkflow
                 "InternalGeeTest",
                 stopwatch.ElapsedMilliseconds);
     }
+
+    private static bool ShouldUseLocalBrowserFirst(
+        DirectRegistrationSiteProfile profile,
+        CaptchaSolverOptions? captchaSolverOptions,
+        IGeetestBrowserTokenService? browserGeetestTokenService) =>
+        browserGeetestTokenService is not null
+        && profile.Site is TargetSite.MM88 or TargetSite.XX88
+        && captchaSolverOptions?.UsesLocalBrowserFirst != false;
 
     private static async Task<string> ResolveGeetestCaptchaIdAsync(
         HttpClient httpClient,
@@ -1031,11 +1290,43 @@ public static class DirectRegistrationWorkflow
     private static Dictionary<string, object?> BuildPayload(
         AccountModel account,
         DirectRegistrationSiteProfile profile,
-        JsonElement geetestValidateV4)
+        GeetestTokenResult verification)
     {
         var phoneNumber = profile.Site == TargetSite.XX88
             ? PhoneNumberFormatter.FormatTenDigitWithLeadingZero(account.PhoneNumber)
             : PhoneNumberFormatter.FormatNineDigitWithoutLeadingZero(account.PhoneNumber);
+
+        if (profile.Site == TargetSite.MM88)
+        {
+            return new Dictionary<string, object?>
+            {
+                ["username"] = account.GetUsername(profile.Site),
+                ["password"] = account.GetPassword(profile.Site),
+                ["confirmPassword"] = account.GetPassword(profile.Site),
+                ["payeeName"] = account.FullName.ToUpperInvariant(),
+                ["email"] = string.Empty,
+                ["qqNum"] = string.Empty,
+                ["mobileNum"] = phoneNumber,
+                ["captcha"] = verification.ImageCaptchaText ?? string.Empty,
+                ["verificationCode"] = string.Empty,
+                ["affiliateCode"] = profile.AffiliateCode,
+                ["paymentPassword"] = string.Empty,
+                ["line"] = string.Empty,
+                ["whatsapp"] = string.Empty,
+                ["facebook"] = string.Empty,
+                ["wechat"] = string.Empty,
+                ["idNumber"] = string.Empty,
+                ["nickname"] = string.Empty,
+                ["referralCode"] = profile.ReferralCode,
+                ["domain"] = profile.AffiliateDomain,
+                ["geetestValidateV4"] = verification.Value,
+                ["login"] = true,
+                ["countryDialingCode"] = "84",
+                ["registerUrl"] = profile.RegisterUrlForPayload,
+                ["registerMethod"] = "WEB",
+                ["loginDeviceId"] = Guid.NewGuid().ToString()
+            };
+        }
 
         return new Dictionary<string, object?>
         {
@@ -1060,12 +1351,12 @@ public static class DirectRegistrationWorkflow
             ["whatsapp"] = string.Empty,
             ["zalo"] = string.Empty,
             ["birthday"] = string.Empty,
-            ["captcha"] = string.Empty,
+            ["captcha"] = verification.ImageCaptchaText ?? string.Empty,
             ["type"] = 0,
             ["domain"] = profile.AffiliateDomain,
             ["verificationCode"] = string.Empty,
             ["login"] = true,
-            ["geetestValidateV4"] = geetestValidateV4,
+            ["geetestValidateV4"] = verification.Value,
             ["lineSessionToken"] = null,
             ["loginDeviceId"] = Guid.NewGuid().ToString(),
             ["isOfficialAppLogin"] = false,
@@ -1187,12 +1478,14 @@ public static class DirectRegistrationWorkflow
                 "fa2202091f2d9086161947f672579b1d",
                 "https://images.0998455.com/",
                 "1",
-                false),
+                false,
+                false,
+                true),
             TargetSite.MM88 => new DirectRegistrationSiteProfile(
                 site,
                 "https://www.mm88o.com",
                 "https://www.mm88o.com/register?referralCode=zfr8673&affiliateCode=gioithieu",
-                "https://www.mm88o.com/register?referralCode=zfr8673&affiliateCode=gioithieu",
+                "https://www.mm88o.com/register?referralCode=zfr8673&affiliateCode=gioithieu&r=zfr8673",
                 "mm88vndkf3",
                 "mm88o",
                 "gioithieu",
@@ -1200,7 +1493,9 @@ public static class DirectRegistrationWorkflow
                 "fa2202091f2d9086161947f672579b1d",
                 "https://images.0998455.com/",
                 "1",
-                false),
+                false,
+                true,
+                true),
             TargetSite.XX88 => new DirectRegistrationSiteProfile(
                 site,
                 "https://gioithieu.xx88.fun",
@@ -1213,6 +1508,8 @@ public static class DirectRegistrationWorkflow
                 "2e3984aebc5904671a2a0a7c284b8c79",
                 "https://images.0998455.com/",
                 "1",
+                true,
+                true,
                 true),
             _ => null
         };
@@ -1229,18 +1526,25 @@ public static class DirectRegistrationWorkflow
         string GeetestCaptchaId,
         string GeetestSdkCdn,
         string GeetestSdkVersion,
-        bool RequiresProxyForDirect);
+        bool RequiresProxyForDirect,
+        bool UsesImageCaptcha,
+        bool UsesGeetestCaptcha);
 
     private sealed record RegisterHttpResponse(
         bool IsSuccessStatusCode,
         HttpStatusCode StatusCode,
         string ResponseText);
 
+    private sealed record RegistrationRetryResult(
+        RegisterHttpResponse Response,
+        GeetestTokenResult Verification);
+
     private sealed record GeetestTokenResult(
         string CaptchaId,
         JsonElement Value,
         string Provider,
-        long ElapsedMilliseconds);
+        long ElapsedMilliseconds,
+        string? ImageCaptchaText = null);
 
     private sealed record GeetestSettingsCacheEntry(
         string CaptchaId,

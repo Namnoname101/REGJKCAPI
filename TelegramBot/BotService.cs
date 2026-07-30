@@ -39,6 +39,9 @@ namespace BAOCODETOOL.TelegramBot
         public string BankName { get; set; } = "";
         public string SoTk { get; set; } = "";
         public string Proxy { get; set; } = "";
+        // Validated accounts are held only until the user confirms the bulk run.
+        // They are never shown back in Telegram messages.
+        public List<AccountModel> PendingBulkAccounts { get; } = new();
         public int ProxyPackageId { get; set; }
         public int ProxyQuantity { get; set; }
         public decimal ProxyUnitPrice { get; set; }
@@ -50,6 +53,7 @@ namespace BAOCODETOOL.TelegramBot
     {
         private const string BrandName = "KJC BOT";
         private const string ProxyPurchaseErrorCode = "PX-001";
+        private static readonly long[] TopUpPresetAmounts = { 20_000, 50_000, 100_000, 200_000 };
 
         private static readonly string[] RegistrationGames =
         {
@@ -82,27 +86,37 @@ namespace BAOCODETOOL.TelegramBot
         private static InlineKeyboardMarkup CancelKeyboard() =>
             new InlineKeyboardMarkup(InlineKeyboardButton.WithCallbackData("🔙 Hủy", "cancel"));
 
-        private static InlineKeyboardMarkup MainMenuKeyboard() =>
-            new InlineKeyboardMarkup(new[]
+        // Keep the main navigation visible above Telegram's input field. Inline
+        // keyboards remain reserved for choices that belong to one message.
+        private static ReplyKeyboardMarkup MainMenuKeyboard() =>
+            new(new[]
             {
-                new[] { InlineKeyboardButton.WithCallbackData("➕ Đăng ký 1 tài khoản", "start_add") },
-                new[] { InlineKeyboardButton.WithCallbackData("📋 Đăng ký hàng loạt", "start_bulk") },
-                new[] { InlineKeyboardButton.WithCallbackData("📊 Theo dõi yêu cầu", "status") },
-                new[] { InlineKeyboardButton.WithCallbackData("👤 Tài khoản của tôi", "account_balance") },
-                new[] { InlineKeyboardButton.WithCallbackData("🌐 Thuê proxy", "buy_proxy") },
-                new[] { InlineKeyboardButton.WithCallbackData("💰 Nạp số dư", "deposit") }
-            });
+                new[]
+                {
+                    new KeyboardButton("➕ Đăng ký 1 tài khoản"),
+                    new KeyboardButton("📋 Đăng ký hàng loạt")
+                },
+                new[]
+                {
+                    new KeyboardButton("📊 Theo dõi yêu cầu"),
+                    new KeyboardButton("👤 Tài khoản của tôi")
+                },
+                new[]
+                {
+                    new KeyboardButton("🌐 Thuê proxy"),
+                    new KeyboardButton("💰 Nạp số dư")
+                }
+            })
+            {
+                ResizeKeyboard = true,
+                IsPersistent = true,
+                InputFieldPlaceholder = "Chọn một dịch vụ..."
+            };
 
         private static string MainMenuText() =>
             $"🤖 <b>{BrandName}</b>\n" +
             "━━━━━━━━━━━━━━━━━━━━\n" +
-            "KJCBOT sẵn sàng hỗ trợ bạn. Vui lòng chọn dịch vụ bên dưới:\n\n" +
-            "➕ <b>Đăng ký 1 tài khoản</b> – Nhập thông tin theo từng bước\n" +
-            "📋 <b>Đăng ký hàng loạt</b> – Gửi danh sách nhiều tài khoản\n" +
-            "📊 <b>Theo dõi yêu cầu</b> – Xem tình trạng xử lý hiện tại\n" +
-            "👤 <b>Tài khoản của tôi</b> – Xem số dư và tổng chi tiêu\n" +
-            "🌐 <b>Thuê proxy</b> – Chọn gói theo nhà mạng và thời hạn\n" +
-            "💰 <b>Nạp số dư</b> – Chuyển khoản và cộng tiền tự động\n";
+            "Chào mừng ae đến với BOTKJC ae test thử trong 2 ngày nhé!!!.";
 
         private string BuildDepositInstructions(long chatId)
         {
@@ -115,6 +129,230 @@ namespace BAOCODETOOL.TelegramBot
                 $"👤 Chủ tài khoản: <b>{WebUtility.HtmlEncode(_sePayOptions.AccountHolder)}</b>\n" +
                 $"📝 Nội dung chuyển khoản: <code>{transferCode}</code>\n\n" +
                 $"⚠️ Vui lòng nhập chính xác nội dung chuyển khoản. Số tiền nhận được sẽ tự động cộng vào số dư KJC Xu của bạn.";
+        }
+
+        private async Task ShowDepositEntryAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            int guideMessageId,
+            CancellationToken ct)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var paymentRequests = scope.ServiceProvider.GetRequiredService<SePayPaymentRequestService>();
+
+            if (!paymentRequests.IsQrConfigured)
+            {
+                await SendNavigationScreenAsync(
+                    bot,
+                    chatId,
+                    BuildDepositInstructions(chatId),
+                    ParseMode.Html,
+                    MainMenuKeyboard(),
+                    ct);
+                return;
+            }
+
+            await StartCustomDepositAmountAsync(bot, chatId, guideMessageId, ct);
+        }
+
+        private static string BuildDepositAmountPrompt(SePayPaymentRequestService paymentRequests) =>
+            $"💰 <b>NẠP SỐ DƯ {BrandName}</b>\n" +
+            "━━━━━━━━━━━━━━━━━━━━\n\n" +
+            "Chọn số tiền muốn nạp hoặc nhấn <b>Nhập số tiền khác</b>.\n" +
+            "Bot sẽ tạo QR có sẵn số tiền và nội dung chuyển khoản.\n\n" +
+            $"💵 Hạn mức: <b>{paymentRequests.MinimumAmount:N0} – {paymentRequests.MaximumAmount:N0} VNĐ</b>";
+
+        private static InlineKeyboardMarkup BuildDepositAmountKeyboard(SePayPaymentRequestService paymentRequests)
+        {
+            var rows = new List<InlineKeyboardButton[]>();
+            var currentRow = new List<InlineKeyboardButton>();
+            foreach (var amount in TopUpPresetAmounts.Where(amount =>
+                         amount >= paymentRequests.MinimumAmount && amount <= paymentRequests.MaximumAmount))
+            {
+                currentRow.Add(InlineKeyboardButton.WithCallbackData(
+                    $"{amount:N0} VNĐ",
+                    $"deposit_amount_{amount}"));
+                if (currentRow.Count == 2)
+                {
+                    rows.Add(currentRow.ToArray());
+                    currentRow.Clear();
+                }
+            }
+
+            if (currentRow.Count > 0)
+                rows.Add(currentRow.ToArray());
+
+            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("✏️ Nhập số tiền khác", "deposit_custom") });
+            rows.Add(new[] { InlineKeyboardButton.WithCallbackData("🔙 Hủy", "cancel") });
+            return new InlineKeyboardMarkup(rows);
+        }
+
+        private async Task StartCustomDepositAmountAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            int guideMessageId,
+            CancellationToken ct)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var paymentRequests = scope.ServiceProvider.GetRequiredService<SePayPaymentRequestService>();
+            if (!paymentRequests.IsQrConfigured)
+            {
+                await SendNavigationScreenAsync(
+                    bot,
+                    chatId,
+                    BuildDepositInstructions(chatId),
+                    ParseMode.Html,
+                    MainMenuKeyboard(),
+                    ct);
+                return;
+            }
+
+            var session = new UserSession
+            {
+                Step = "deposit_amount",
+                GuideMessageId = guideMessageId
+            };
+            _sessions[chatId] = session;
+
+            await ReplaceSessionPromptAsync(
+                bot,
+                chatId,
+                session,
+                $"💰 <b>NHẬP SỐ TIỀN NẠP</b>\n\n" +
+                $"Vui lòng nạp Min <b>{paymentRequests.MinimumAmount:N0}</b> VNĐ.\n" +
+                "Nạp sai Min Ad không hỗ trợ nhé.",
+                ParseMode.Html,
+                CancelKeyboard(),
+                ct);
+        }
+
+        private async Task HandleDepositAmountInputAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            int userMessageId,
+            string text,
+            UserSession session,
+            CancellationToken ct)
+        {
+            using var scope = _scopeFactory.CreateScope();
+            var paymentRequests = scope.ServiceProvider.GetRequiredService<SePayPaymentRequestService>();
+            if (!paymentRequests.IsQrConfigured)
+            {
+                _sessions.TryRemove(chatId, out _);
+                await SendReplacingMessageAsync(
+                    bot,
+                    chatId,
+                    session.GuideMessageId,
+                    BuildDepositInstructions(chatId),
+                    ParseMode.Html,
+                    MainMenuKeyboard(),
+                    ct,
+                    userMessageId);
+                return;
+            }
+
+            if (!paymentRequests.TryParseAmount(text, out var amount))
+            {
+                await SendError(
+                    bot,
+                    chatId,
+                    session,
+                    $"Số tiền chưa hợp lệ. Hãy nhập từ <b>{paymentRequests.MinimumAmount:N0}</b>.",
+                    ct);
+                return;
+            }
+
+            _sessions.TryRemove(chatId, out _);
+            await CreateAndSendPaymentQrAsync(bot, chatId, amount, session.GuideMessageId, userMessageId, ct);
+        }
+
+        private async Task CreateAndSendPaymentQrAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            long amount,
+            int messageIdToRemove,
+            int userMessageIdToRemove,
+            CancellationToken ct)
+        {
+            SePayPaymentQr paymentQr;
+            using (var scope = _scopeFactory.CreateScope())
+            {
+                var paymentRequests = scope.ServiceProvider.GetRequiredService<SePayPaymentRequestService>();
+                if (!paymentRequests.IsQrConfigured)
+                {
+                    await SendNavigationScreenAsync(
+                        bot,
+                        chatId,
+                        BuildDepositInstructions(chatId),
+                        ParseMode.Html,
+                        MainMenuKeyboard(),
+                        ct);
+                    return;
+                }
+
+                try
+                {
+                    paymentQr = await paymentRequests.CreateAsync(chatId, amount, ct);
+                }
+                catch (ArgumentOutOfRangeException)
+                {
+                    await bot.SendMessage(
+                        chatId,
+                        $"⚠️ Số tiền phải từ <b>{paymentRequests.MinimumAmount:N0}</b> đến <b>{paymentRequests.MaximumAmount:N0} VNĐ</b>.",
+                        ParseMode.Html,
+                        cancellationToken: ct);
+                    return;
+                }
+                catch (InvalidOperationException exception)
+                {
+                    _logger.LogWarning(exception, "SePay QR is not ready for ChatId {ChatId}.", chatId);
+                    await bot.SendMessage(
+                        chatId,
+                        "⚠️ QR thanh toán lỗi. Vui lòng thử lại sau hoặc liên hệ hỗ trợ.",
+                        cancellationToken: ct);
+                    return;
+                }
+            }
+
+            var paymentRequest = paymentQr.PaymentRequest;
+            var expiresAt = paymentRequest.ExpiresAt.ToLocalTime().ToString("HH:mm dd/MM/yyyy");
+            var caption =
+                $"💰 <b>QUÉT QR ĐỂ NẠP SỐ DƯ</b>\n" +
+                "━━━━━━━━━━━━━━━━━━━━\n\n" +
+                $"💵 Số tiền: <b>{paymentRequest.ExpectedAmount:N0} VNĐ</b>\n" +
+                $"📝 Nội dung: <code>{paymentRequest.TransferCode}</code>\n" +
+                $"⏳ Mã có hiệu lực đến: <b>{expiresAt}</b>\n\n" +
+                "App ngân hàng sẽ tự điền sẵn số tiền và nội dung sau khi quét. " +
+                "Hệ thống chỉ tự cộng tiền khi giao dịch khớp đúng mã và số tiền này.";
+            var replyMarkup = new InlineKeyboardMarkup(new[]
+            {
+                new[] { InlineKeyboardButton.WithCallbackData("➕ Tạo mã nạp khác", "deposit") },
+                new[] { InlineKeyboardButton.WithCallbackData("🔙 Về menu", "cancel") }
+            });
+
+            try
+            {
+                await bot.SendPhoto(
+                    chatId,
+                    InputFile.FromUri(paymentQr.QrImageUrl),
+                    caption: caption,
+                    parseMode: ParseMode.Html,
+                    replyMarkup: replyMarkup,
+                    cancellationToken: ct);
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "Could not send SePay QR image to ChatId {ChatId}.", chatId);
+                await bot.SendMessage(
+                    chatId,
+                    $"{caption}\n\n<a href=\"{WebUtility.HtmlEncode(paymentQr.QrImageUrl)}\">Mở mã QR thanh toán</a>",
+                    ParseMode.Html,
+                    replyMarkup: replyMarkup,
+                    cancellationToken: ct);
+            }
+
+            await DeleteMessageSafelyAsync(bot, chatId, messageIdToRemove, ct);
+            await DeleteMessageSafelyAsync(bot, chatId, userMessageIdToRemove, ct);
         }
 
         private async Task ShowProxyPackagesMenuAsync(ITelegramBotClient bot, long chatId, int? messageIdToEdit, string? category, CancellationToken ct)
@@ -138,9 +376,12 @@ namespace BAOCODETOOL.TelegramBot
 
                 if (activeCategories.Count == 0)
                 {
-                    var emptyMsg = "⚠️ Hiện chưa có gói proxy nào đang mở bán. Vui lòng quay lại sau hoặc liên hệ bộ phận hỗ trợ KJCBOT.";
+                    var emptyMsg = "⚠️ Hiện đang hết Proxy. Vui lòng quay lại sau hoặc liên hệ bộ phận hỗ trợ KJCBOT.";
                     if (messageIdToEdit.HasValue)
-                        await bot.EditMessageText(chatId, messageIdToEdit.Value, emptyMsg, replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                    {
+                        await bot.EditMessageText(chatId, messageIdToEdit.Value, emptyMsg, cancellationToken: ct);
+                        await bot.SendMessage(chatId, "Sử dụng Menu bên dưới để thao tác nhé.", replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                    }
                     else
                         await bot.SendMessage(chatId, emptyMsg, replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
                     return;
@@ -148,7 +389,7 @@ namespace BAOCODETOOL.TelegramBot
 
                 var text = $"🌐 <b>PROXY TĨNH VIỆT NAM | {BrandName}</b>\n" +
                            "━━━━━━━━━━━━━━━━━━━━\n" +
-                           "Vui lòng chọn <b>nhà mạng</b> bạn muốn sử dụng:\n\n" +
+                           "Vui lòng chọn <b>nhà mạng</b> muốn sử dụng:\n\n" +
                            "💡 <i>Proxy HTTP/HTTPS được hệ thống kiểm tra kết nối trước khi bàn giao.</i>";
 
                 var buttons = new List<InlineKeyboardButton[]>();
@@ -192,7 +433,7 @@ namespace BAOCODETOOL.TelegramBot
             string catDisplay = category == "ALL" ? "VIP ĐA MẠNG (ALL)" : category.ToUpper();
             if (packages.Count == 0)
             {
-                var emptyMsg = $"⚠️ Hiện tại nhà mạng <b>{catDisplay}</b> tạm hết gói mở bán. Vui lòng chọn nhà mạng khác.";
+                var emptyMsg = $"⚠️ Hiện tại nhà mạng <b>{catDisplay}</b> tạm hết hàng. Vui lòng chọn nhà mạng khác.";
                 var emptyButtons = new List<InlineKeyboardButton[]>
                 {
                     new[] { InlineKeyboardButton.WithCallbackData("🔙 Chọn nhà mạng khác", "pkgs_menu") },
@@ -572,7 +813,7 @@ namespace BAOCODETOOL.TelegramBot
             long chatId,
             int messageId,
             string text,
-            InlineKeyboardMarkup? replyMarkup,
+            ReplyMarkup? replyMarkup,
             CancellationToken ct)
         {
             if (messageId > 0)
@@ -582,8 +823,17 @@ namespace BAOCODETOOL.TelegramBot
                     messageId,
                     text,
                     ParseMode.Html,
-                    replyMarkup: replyMarkup,
+                    replyMarkup: replyMarkup as InlineKeyboardMarkup,
                     cancellationToken: ct);
+
+                if (replyMarkup is ReplyKeyboardMarkup)
+                {
+                    await bot.SendMessage(
+                        chatId,
+                        "Menu dịch vụ đã sẵn sàng bên dưới.",
+                        replyMarkup: replyMarkup,
+                        cancellationToken: ct);
+                }
                 return messageId;
             }
 
@@ -698,7 +948,7 @@ namespace BAOCODETOOL.TelegramBot
             int previousMessageId,
             string text,
             ParseMode parseMode,
-            InlineKeyboardMarkup? replyMarkup,
+            ReplyMarkup? replyMarkup,
             CancellationToken ct,
             int userMessageId = 0)
         {
@@ -724,7 +974,7 @@ namespace BAOCODETOOL.TelegramBot
             UserSession session,
             string text,
             ParseMode parseMode,
-            InlineKeyboardMarkup? replyMarkup,
+            ReplyMarkup? replyMarkup,
             CancellationToken ct,
             int userMessageId = 0)
         {
@@ -749,7 +999,7 @@ namespace BAOCODETOOL.TelegramBot
             long chatId,
             string text,
             ParseMode parseMode,
-            InlineKeyboardMarkup replyMarkup,
+            ReplyMarkup? replyMarkup,
             CancellationToken ct) =>
             bot.SendMessage(
                 chatId,
@@ -924,6 +1174,37 @@ namespace BAOCODETOOL.TelegramBot
             }
 
             _logger.LogInformation("Telegram connected. Bot={BotUsername}", bot.Username);
+
+            try
+            {
+                await _botClient.SetMyCommands(
+                    new[]
+                    {
+                        new BotCommand { Command = "add", Description = "Đăng ký một tài khoản" },
+                        new BotCommand { Command = "bulk", Description = "Đăng ký hàng loạt" },
+                        new BotCommand { Command = "status", Description = "Theo dõi yêu cầu" },
+                        new BotCommand { Command = "balance", Description = "Tài khoản của tôi" },
+                        new BotCommand { Command = "buyproxy", Description = "Thuê proxy" },
+                        new BotCommand { Command = "deposit", Description = "Nạp số dư" },
+                        new BotCommand { Command = "menu", Description = "Mở lời chào" }
+                    },
+                    cancellationToken: stoppingToken);
+
+                // Some Telegram clients retain the attachment/microphone
+                // affordance until the default menu button is explicitly set.
+                await _botClient.SetChatMenuButton(
+                    chatId: null,
+                    menuButton: new MenuButtonCommands(),
+                    cancellationToken: stoppingToken);
+            }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(exception, "Could not configure Telegram command menu.");
+            }
 
             var pollingRetryDelay = TimeSpan.FromSeconds(2);
             var receiverOptions = new ReceiverOptions { AllowedUpdates = Array.Empty<UpdateType>() };
@@ -1320,6 +1601,38 @@ namespace BAOCODETOOL.TelegramBot
 
                 await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
 
+                if (cb.Data == "deposit_custom")
+                {
+                    await StartCustomDepositAmountAsync(
+                        bot,
+                        cbChat,
+                        cb.Message?.MessageId ?? 0,
+                        ct);
+                    return;
+                }
+
+                if (cb.Data?.StartsWith("deposit_amount_", StringComparison.Ordinal) == true)
+                {
+                    if (long.TryParse(cb.Data["deposit_amount_".Length..], out var amount))
+                    {
+                        await CreateAndSendPaymentQrAsync(
+                            bot,
+                            cbChat,
+                            amount,
+                            cb.Message?.MessageId ?? 0,
+                            0,
+                            ct);
+                    }
+                    else
+                    {
+                        await bot.SendMessage(
+                            cbChat,
+                            "⚠️ Không thể đọc số tiền nạp. Vui lòng chọn lại.",
+                            cancellationToken: ct);
+                    }
+                    return;
+                }
+
                 switch (cb.Data)
                 {
                     case "hide_result":
@@ -1360,9 +1673,96 @@ namespace BAOCODETOOL.TelegramBot
                             ParseMode.Html, MainMenuKeyboard(), ct);
                         break;
 
+                    case "confirm_bulk_submit":
+                        if (_sessions.TryGetValue(cbChat, out var bulkConfirmation)
+                            && bulkConfirmation.Step == "bulk_confirming"
+                            && bulkConfirmation.PendingBulkAccounts.Count > 0)
+                        {
+                            // Change state before awaiting Telegram so repeated taps cannot
+                            // submit this batch more than once.
+                            bulkConfirmation.Step = "bulk_submitting";
+                            try
+                            {
+                                await bot.EditMessageReplyMarkup(
+                                    cbChat,
+                                    cb.Message!.MessageId,
+                                    replyMarkup: null,
+                                    cancellationToken: ct);
+                            }
+                            catch { }
+
+                            await SubmitBulkAccountsAsync(bot, cbChat, bulkConfirmation, ct);
+                        }
+                        else
+                        {
+                            await bot.SendMessage(
+                                cbChat,
+                                "⚠️ Danh sách hàng loạt đã hết hiệu lực hoặc đang được xử lý.",
+                                replyMarkup: MainMenuKeyboard(),
+                                cancellationToken: ct);
+                        }
+                        break;
+
+                    case "bulk_reenter":
+                        if (_sessions.TryGetValue(cbChat, out var bulkReentry)
+                            && bulkReentry.Step == "bulk_confirming")
+                        {
+                            bulkReentry.PendingBulkAccounts.Clear();
+                            bulkReentry.Step = "bulk";
+                            await ReplaceSessionPromptAsync(
+                                bot,
+                                cbChat,
+                                bulkReentry,
+                                "📋 <b>NHẬP LẠI DANH SÁCH HÀNG LOẠT</b>\n" +
+                                "━━━━━━━━━━━━━━━━━━━━\n" +
+                                "Dán lại toàn bộ danh sách, mỗi dòng theo định dạng:\n" +
+                                "<code>HOTEN|TENNGANHANG|SDT|SOTK|PROXY</code>\n\n" +
+                                "Danh sách trước chưa được chạy.",
+                                ParseMode.Html,
+                                CancelKeyboard(),
+                                ct);
+                        }
+                        else
+                        {
+                            await bot.SendMessage(
+                                cbChat,
+                                "⚠️ Phiên nhập hàng loạt đã hết hiệu lực. Vui lòng bắt đầu lại.",
+                                replyMarkup: MainMenuKeyboard(),
+                                cancellationToken: ct);
+                        }
+                        break;
+
                     case "confirm_submit":
+                        await bot.AnswerCallbackQuery(cb.Id, cancellationToken: ct);
                         if (_sessions.TryGetValue(cbChat, out var sess) && sess.Step == "confirming")
+                        {
+                            // Set this before the first await so a second tap cannot enqueue
+                            // the same account a second time.
+                            sess.Step = "submitting";
+                            try
+                            {
+                                await bot.EditMessageReplyMarkup(
+                                    cbChat,
+                                    cb.Message!.MessageId,
+                                    replyMarkup: null,
+                                    cancellationToken: ct);
+                            }
+                            catch
+                            {
+                                // The job is still safe to submit if Telegram cannot remove
+                                // the buttons (for example, the message was deleted).
+                            }
+
                             await SubmitAccount(bot, cbChat, sess, ct);
+                        }
+                        else
+                        {
+                            await bot.SendMessage(
+                                cbChat,
+                                "⚠️ Yêu cầu tạo tài khoản đã hết hiệu lực hoặc đang được xử lý.",
+                                replyMarkup: MainMenuKeyboard(),
+                                cancellationToken: ct);
+                        }
                         break;
 
                 case "start_bulk":
@@ -1404,9 +1804,11 @@ namespace BAOCODETOOL.TelegramBot
                     break;
 
                 case "deposit":
-                    await SendNavigationScreenAsync(bot, cbChat,
-                        BuildDepositInstructions(cbChat),
-                        ParseMode.Html, MainMenuKeyboard(), ct);
+                    await ShowDepositEntryAsync(
+                        bot,
+                        cbChat,
+                        cb.Message?.MessageId ?? 0,
+                        ct);
                     break;
 
                 case "edit_restart":
@@ -1466,7 +1868,7 @@ namespace BAOCODETOOL.TelegramBot
             }
 
             if (msg.Text is not { } text) return;
-            text = text.Trim();
+            text = NormalizeMainMenuSelection(text.Trim());
 
             // Chưa được duyệt
             if (!_allowedUsers.Contains(chatId))
@@ -1535,6 +1937,21 @@ namespace BAOCODETOOL.TelegramBot
                 return;
             }
 
+            // /status shortcut
+            if (text.StartsWith("/status"))
+            {
+                var queueStatus = _jobQueue.GetSnapshot();
+                await bot.SendMessage(chatId,
+                    $"📊 <b>TRẠNG THÁI XỬ LÝ | {BrandName}</b>\n━━━━━━━━━━━━━━━━━━━━\n" +
+                    $"🔄 Đang xử lý: <b>{queueStatus.Processing}/{_maxConcurrentJobs}</b> yêu cầu\n" +
+                    $"⏳ Đang chờ: <b>{queueStatus.Pending}</b> yêu cầu\n" +
+                    $"✅ Năng lực còn trống: <b>{Math.Max(0, _maxConcurrentJobs - queueStatus.Processing)}/{_maxConcurrentJobs}</b>",
+                    ParseMode.Html,
+                    replyMarkup: MainMenuKeyboard(),
+                    cancellationToken: ct);
+                return;
+            }
+
             // /balance shortcut
             if (text.StartsWith("/balance"))
             {
@@ -1563,9 +1980,7 @@ namespace BAOCODETOOL.TelegramBot
             // /deposit shortcut
             if (text.StartsWith("/deposit"))
             {
-                await bot.SendMessage(chatId,
-                    BuildDepositInstructions(chatId),
-                    ParseMode.Html, replyMarkup: MainMenuKeyboard(), cancellationToken: ct);
+                await ShowDepositEntryAsync(bot, chatId, 0, ct);
                 return;
             }
 
@@ -1584,6 +1999,18 @@ namespace BAOCODETOOL.TelegramBot
 
             // Xử lý input theo bước
             var session = GetSession(chatId);
+
+            if (session.Step == "deposit_amount")
+            {
+                await HandleDepositAmountInputAsync(
+                    bot,
+                    chatId,
+                    msg.MessageId,
+                    text,
+                    session,
+                    ct);
+                return;
+            }
 
             if (session.Step == "proxy_quantity")
             {
@@ -1616,6 +2043,26 @@ namespace BAOCODETOOL.TelegramBot
             }
 
             await HandleStepInput(bot, chatId, msg.MessageId, text, session, ct);
+        }
+
+        private static string NormalizeMainMenuSelection(string text)
+        {
+            // Reply-keyboard text can contain emoji variation selectors or
+            // invisible spacing from some Telegram clients. Each button has a
+            // unique stable emoji, with a short text fallback for accessibility.
+            if (text.Contains("➕", StringComparison.Ordinal)
+                || text.Contains("1 tài khoản", StringComparison.OrdinalIgnoreCase)) return "/add";
+            if (text.Contains("📋", StringComparison.Ordinal)
+                || text.Contains("hàng loạt", StringComparison.OrdinalIgnoreCase)) return "/bulk";
+            if (text.Contains("📊", StringComparison.Ordinal)
+                || text.Contains("Theo dõi", StringComparison.OrdinalIgnoreCase)) return "/status";
+            if (text.Contains("👤", StringComparison.Ordinal)
+                || text.Contains("Tài khoản của tôi", StringComparison.OrdinalIgnoreCase)) return "/balance";
+            if (text.Contains("🌐", StringComparison.Ordinal)
+                || text.Contains("Thuê proxy", StringComparison.OrdinalIgnoreCase)) return "/buyproxy";
+            if (text.Contains("💰", StringComparison.Ordinal)
+                || text.Contains("Nạp", StringComparison.OrdinalIgnoreCase)) return "/deposit";
+            return text;
         }
 
         // ══════════════════════════════════════════════════════════════════════
@@ -1672,6 +2119,22 @@ namespace BAOCODETOOL.TelegramBot
                     await bot.SendMessage(
                         chatId,
                         "Vui lòng dùng các nút trong tin nhắn xác nhận mua proxy.",
+                        cancellationToken: ct);
+                    return;
+
+                case "confirming":
+                case "submitting":
+                    await bot.SendMessage(
+                        chatId,
+                        "Vui lòng dùng nút trong tin nhắn xác nhận tạo tài khoản.",
+                        cancellationToken: ct);
+                    return;
+
+                case "bulk_confirming":
+                case "bulk_submitting":
+                    await bot.SendMessage(
+                        chatId,
+                        "Vui lòng dùng nút trong tin nhắn xác nhận đăng ký hàng loạt.",
                         cancellationToken: ct);
                     return;
 
@@ -1765,6 +2228,23 @@ namespace BAOCODETOOL.TelegramBot
                 ParseMode.Html, CancelKeyboard(), ct);
         }
 
+        private static string MaskPhone(string phone) =>
+            phone.Length <= 6 ? "••••" : $"{phone[..3]}••••{phone[^3..]}";
+
+        private static string MaskAccountNumber(string accountNumber) =>
+            accountNumber.Length <= 4 ? "••••" : $"••••{accountNumber[^4..]}";
+
+        private static string MaskProxy(string proxy)
+        {
+            if (string.IsNullOrWhiteSpace(proxy))
+                return "Không dùng proxy";
+
+            var parts = proxy.Split(':', StringSplitOptions.TrimEntries);
+            return parts.Length >= 2
+                ? $"{parts[0]}:{parts[1]} (đã ẩn thông tin đăng nhập)"
+                : "Đã nhập proxy (đã ẩn)";
+        }
+
         private async Task SendConfirmationAsync(
             ITelegramBotClient bot,
             long chatId,
@@ -1772,31 +2252,35 @@ namespace BAOCODETOOL.TelegramBot
             CancellationToken cancellationToken,
             int userMessageId = 0)
         {
-            var proxyText = string.IsNullOrWhiteSpace(session.Proxy)
-                ? "Không dùng proxy (kết nối trực tiếp)"
-                : session.Proxy;
-
             await ReplaceSessionPromptAsync(
                 bot,
                 chatId,
                 session,
-                "📋 <b>XÁC NHẬN THÔNG TIN</b>\n" +
+                "🧾 <b>XÁC NHẬN TẠO TÀI KHOẢN</b>\n" +
                 "━━━━━━━━━━━━━━━━━━━━\n" +
-                $"🎮 Nhà cái:  <b>{WebUtility.HtmlEncode(FormatSelectedGames(session.SelectedGames))}</b>\n" +
+                $"🎮 Site:      <b>{WebUtility.HtmlEncode(FormatSelectedGames(session.SelectedGames))}</b>\n" +
+                $"📌 Số lượt:   <b>1 tài khoản trên {session.SelectedGames.Count} site</b>\n" +
                 $"👤 Họ tên:    <b>{WebUtility.HtmlEncode(session.FullName)}</b>\n" +
-                $"📞 SĐT:       <b>{WebUtility.HtmlEncode(session.Phone)}</b>\n" +
+                $"📞 SĐT:       <b>{WebUtility.HtmlEncode(MaskPhone(session.Phone))}</b>\n" +
                 $"🏦 Ngân hàng: <b>{WebUtility.HtmlEncode(session.BankName)}</b>\n" +
-                $"💳 STK:       <b>{WebUtility.HtmlEncode(session.SoTk)}</b>\n" +
-                $"🌐 Proxy:     <code>{WebUtility.HtmlEncode(proxyText)}</code>\n" +
+                $"💳 STK:       <b>{WebUtility.HtmlEncode(MaskAccountNumber(session.SoTk))}</b>\n" +
+                $"🌐 Proxy:     <code>{WebUtility.HtmlEncode(MaskProxy(session.Proxy))}</code>\n" +
                 "━━━━━━━━━━━━━━━━━━━━\n" +
-                "Thông tin đúng chưa? Nhấn <b>Xác nhận</b> để chạy.",
+                "Kiểm tra thông tin trước khi chạy. Sau khi xác nhận, yêu cầu sẽ được đưa vào hàng đợi.",
                 ParseMode.Html,
                 new InlineKeyboardMarkup(new[]
                 {
                     new[]
                     {
-                        InlineKeyboardButton.WithCallbackData("✅ Xác nhận & Chạy", "confirm_submit"),
-                        InlineKeyboardButton.WithCallbackData("🔄 Nhập lại", "edit_restart")
+                        InlineKeyboardButton.WithCallbackData("✅ Xác nhận tạo", "confirm_submit")
+                    },
+                    new[]
+                    {
+                        InlineKeyboardButton.WithCallbackData("✏️ Sửa thông tin", "edit_restart")
+                    },
+                    new[]
+                    {
+                        InlineKeyboardButton.WithCallbackData("❌ Hủy", "cancel")
                     }
                 }),
                 cancellationToken,
@@ -1994,39 +2478,66 @@ namespace BAOCODETOOL.TelegramBot
                 return;
             }
 
-            // Báo trước số lượng
-            await ReplaceSessionPromptAsync(bot, chatId, sess,
-                $"🚀 <b>Đã tiếp nhận {validAccounts.Count} tài khoản hợp lệ.</b>\n" +
-                $"Các tài khoản sẽ được chạy tuần tự (tối đa {_maxConcurrentJobs} cùng lúc).",
-                ParseMode.Html, null, ct, userMessageId);
-
-            _sessions.TryRemove(chatId, out _);
-
-            var batchId = Guid.NewGuid();
-
             foreach (var preparedAccount in validAccounts)
             {
                 ApplySelectedSites(preparedAccount, sess.SelectedGames);
             }
 
-            // Chuẩn bị và đưa từng tài khoản vào queue nền.
-            var jobs = new List<RegistrationJob>(validAccounts.Count);
-            foreach (var account in validAccounts)
-            {
-                
-                // Chuẩn bị các selected site
-                var job = await _resultSender.CreateJobAsync(
-                    chatId,
-                    account,
-                    isBulk: true,
-                    batchId,
-                    ct);
+            sess.PendingBulkAccounts.Clear();
+            sess.PendingBulkAccounts.AddRange(validAccounts);
+            sess.Step = "bulk_confirming";
 
-                jobs.Add(job);
+            await ReplaceSessionPromptAsync(bot, chatId, sess,
+                "🧾 <b>XÁC NHẬN ĐĂNG KÝ HÀNG LOẠT</b>\n" +
+                "━━━━━━━━━━━━━━━━━━━━\n" +
+                $"👥 Số tài khoản hợp lệ: <b>{validAccounts.Count}</b>\n" +
+                $"🎮 Site đã chọn: <b>{WebUtility.HtmlEncode(FormatSelectedGames(sess.SelectedGames))}</b>\n" +
+                $"🚀 Tổng lượt đăng ký: <b>{validAccounts.Count * sess.SelectedGames.Count}</b>\n" +
+                $"⚙️ Tối đa chạy cùng lúc: <b>{_maxConcurrentJobs} tài khoản</b>\n" +
+                "━━━━━━━━━━━━━━━━━━━━\n" +
+                "Danh sách chưa được chạy. Nhấn <b>Xác nhận chạy</b> để đưa vào hàng đợi.",
+                ParseMode.Html,
+                new InlineKeyboardMarkup(new[]
+                {
+                    new[] { InlineKeyboardButton.WithCallbackData("✅ Xác nhận chạy", "confirm_bulk_submit") },
+                    new[] { InlineKeyboardButton.WithCallbackData("✏️ Nhập lại danh sách", "bulk_reenter") },
+                    new[] { InlineKeyboardButton.WithCallbackData("❌ Hủy", "cancel") }
+                }),
+                ct,
+                userMessageId);
+        }
+
+        private async Task SubmitBulkAccountsAsync(
+            ITelegramBotClient bot,
+            long chatId,
+            UserSession session,
+            CancellationToken ct)
+        {
+            var accounts = session.PendingBulkAccounts.ToList();
+            if (accounts.Count == 0)
+            {
+                await bot.SendMessage(chatId,
+                    "⚠️ Danh sách đăng ký hàng loạt đã hết hiệu lực. Vui lòng nhập lại.",
+                    replyMarkup: MainMenuKeyboard(),
+                    cancellationToken: ct);
+                return;
             }
 
-            _profileRepository.AddRange(validAccounts);
+            _sessions.TryRemove(chatId, out _);
+            await bot.SendMessage(chatId,
+                $"🚀 <b>Đã xác nhận {accounts.Count} tài khoản.</b>\n" +
+                $"Các tài khoản sẽ được chạy tuần tự (tối đa {_maxConcurrentJobs} cùng lúc).",
+                ParseMode.Html,
+                cancellationToken: ct);
 
+            var batchId = Guid.NewGuid();
+            var jobs = new List<RegistrationJob>(accounts.Count);
+            foreach (var account in accounts)
+            {
+                jobs.Add(await _resultSender.CreateJobAsync(chatId, account, isBulk: true, batchId, ct));
+            }
+
+            _profileRepository.AddRange(accounts);
             foreach (var job in jobs)
             {
                 await _jobQueue.EnqueueBatchAsync(new[] { job }, ct);

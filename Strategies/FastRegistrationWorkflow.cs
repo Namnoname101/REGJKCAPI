@@ -69,6 +69,22 @@ internal static class FastRegistrationWorkflow
                 });
         }
 
+        function isCaptchaInput(input) {
+            const hint = normalize([
+                input.id,
+                input.name,
+                input.placeholder,
+                input.getAttribute('aria-label'),
+                input.getAttribute('autocomplete')
+            ].filter(Boolean).join(' '));
+
+            return hint.includes('captcha')
+                || hint.includes('ma xac minh')
+                || hint.includes('verification code')
+                || hint.includes('verify code')
+                || hint.includes('security code');
+        }
+
         function setValue(el, value) {
             if (!el) return;
             const prototype = el.tagName === 'TEXTAREA'
@@ -140,8 +156,10 @@ internal static class FastRegistrationWorkflow
             try {
                 closeBlockingPopups();
 
-                const inputs = visibleInputs();
-                lastInputCount = inputs.length;
+                const allInputs = visibleInputs();
+                const captchaInputs = allInputs.filter(isCaptchaInput);
+                const inputs = allInputs.filter(input => !captchaInputs.includes(input));
+                lastInputCount = allInputs.length;
                 const submitButton = findSubmitButton();
 
                 if (inputs.length >= 3 && submitButton) {
@@ -170,6 +188,11 @@ internal static class FastRegistrationWorkflow
                             if (first) setValue(first, fullName);
                             if (second) setValue(second, phoneNumber);
                         }
+                    }
+
+                    if (captchaInputs.length > 0) {
+                        finish(true, 'filled', { requiresImageCaptcha: true });
+                        return;
                     }
 
                     timer = setTimeout(() => {
@@ -240,13 +263,67 @@ internal static class FastRegistrationWorkflow
             fallbackOrder == FastRegistrationFallbackOrder.PhoneThenFullName,
             FormTimeoutMs);
 
-        if (TryReadResult(result, out var ok, out var message, out var elapsedMs, out var inputCount)
+        if (TryReadResult(
+                result,
+                out var ok,
+                out var message,
+                out var elapsedMs,
+                out var inputCount,
+                out var requiresImageCaptcha)
             && ok)
         {
+            if (requiresImageCaptcha)
+            {
+                var solver = executionContext.ImageCaptchaSolver;
+                if (solver?.IsConfigured != true)
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        AccountStatus.Failed,
+                        "Image captcha detected but OMOCaptcha is not configured.");
+                    return false;
+                }
+
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    logMessage: "Solving image captcha with OMOCaptcha...");
+                var captchaResult = ImageCaptchaBrowserWorkflow.SolveAndFillAsync(
+                        driver,
+                        solver,
+                        executionContext.CancellationToken)
+                    .GetAwaiter()
+                    .GetResult();
+                if (!captchaResult.IsSuccess)
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        AccountStatus.Failed,
+                        $"Image captcha failed: {captchaResult.Message}");
+                    return false;
+                }
+
+                executionContext.Checkpoint();
+                executionContext.Delay(TimeSpan.FromMilliseconds(80));
+                if (!SubmitRegistrationForm(javaScript))
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        AccountStatus.Failed,
+                        "Captcha was filled but the registration button could not be submitted.");
+                    return false;
+                }
+            }
+
             AutomationUi.SetSiteStatus(
                 account,
                 siteRun,
-                logMessage: $"Registration form submitted in {elapsedMs}ms ({inputCount} inputs).");
+                logMessage: requiresImageCaptcha
+                    ? $"Image captcha solved and registration form submitted ({inputCount} inputs)."
+                    : $"Registration form submitted in {elapsedMs}ms ({inputCount} inputs).");
             return true;
         }
 
@@ -264,12 +341,14 @@ internal static class FastRegistrationWorkflow
         out bool ok,
         out string message,
         out long elapsedMs,
-        out long inputCount)
+        out long inputCount,
+        out bool requiresImageCaptcha)
     {
         ok = false;
         message = string.Empty;
         elapsedMs = 0;
         inputCount = 0;
+        requiresImageCaptcha = false;
 
         if (result is not IReadOnlyDictionary<string, object> values)
         {
@@ -283,7 +362,48 @@ internal static class FastRegistrationWorkflow
             : string.Empty;
         elapsedMs = ReadInt64(values, "elapsedMs");
         inputCount = ReadInt64(values, "inputCount");
+        requiresImageCaptcha = values.TryGetValue(
+                                   "requiresImageCaptcha",
+                                   out var captchaValue)
+                               && captchaValue is bool captchaBoolean
+                               && captchaBoolean;
         return true;
+    }
+
+    private static bool SubmitRegistrationForm(IJavaScriptExecutor javaScript)
+    {
+        var result = javaScript.ExecuteScript(
+            """
+            const normalize = text => String(text || '')
+                .normalize('NFD')
+                .replace(/[\u0300-\u036f]/g, '')
+                .trim()
+                .toLowerCase();
+            const visible = element => {
+                if (!element) return false;
+                const style = window.getComputedStyle(element);
+                if (style.display === 'none' || style.visibility === 'hidden') return false;
+                const rect = element.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+            };
+            const buttons = Array.from(document.querySelectorAll(
+                'button.submit-btn, button[type="submit"], .submit-btn, button'));
+            const button = buttons.find(candidate => {
+                if (!visible(candidate)) return false;
+                const text = normalize(candidate.innerText || candidate.textContent);
+                if (text === 'huy' || text === 'cancel' || text === 'dong') return false;
+                return candidate.matches('button.submit-btn, button[type="submit"], .submit-btn')
+                    || text.includes('dang ky')
+                    || text.includes('register');
+            });
+            if (!button) return false;
+            button.disabled = false;
+            button.removeAttribute('disabled');
+            button.click();
+            return true;
+            """);
+
+        return result is bool submitted && submitted;
     }
 
     private static long ReadInt64(IReadOnlyDictionary<string, object> values, string key)

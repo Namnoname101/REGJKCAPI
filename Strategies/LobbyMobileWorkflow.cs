@@ -2,6 +2,7 @@ using System.Collections.Generic;
 using BAOCODETOOL.Core;
 using BAOCODETOOL.Models;
 using OpenQA.Selenium;
+using OpenQA.Selenium.Interactions;
 
 namespace BAOCODETOOL.Strategies;
 
@@ -80,6 +81,16 @@ internal static class LobbyMobileWorkflow
                 return false;
             }
 
+            if (!TryClickRegistrationSubmit(driver, javaScript, out var clickError))
+            {
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Failed,
+                    $"Mobile lobby form could not be submitted: {clickError}");
+                return false;
+            }
+
             AutomationUi.SetSiteStatus(
                 account,
                 siteRun,
@@ -87,13 +98,20 @@ internal static class LobbyMobileWorkflow
 
             var deadline = DateTime.UtcNow.AddSeconds(RegistrationResultTimeoutSeconds);
             var captchaWasSeen = false;
+            var sliderAttempts = 0;
+            var nextSliderAttemptAt = DateTime.MinValue;
             while (DateTime.UtcNow < deadline)
             {
                 executionContext.Checkpoint();
 
-                var state = ReadRegistrationState(javaScript);
+                var state = IsRegistrationSuccessVisible(driver)
+                    ? "success"
+                    : IsBotionSliderVisible(driver)
+                        ? "captcha"
+                        : ReadRegistrationState(javaScript);
                 if (state.Equals("success", StringComparison.OrdinalIgnoreCase))
                 {
+                    TryDismissRegistrationSuccess(driver, javaScript);
                     AutomationUi.SetSiteStatus(
                         account,
                         siteRun,
@@ -111,14 +129,53 @@ internal static class LobbyMobileWorkflow
                     return false;
                 }
 
-                if (state.Equals("captcha", StringComparison.OrdinalIgnoreCase)
-                    && !captchaWasSeen)
+                if (state.Equals("captcha", StringComparison.OrdinalIgnoreCase))
                 {
-                    captchaWasSeen = true;
-                    AutomationUi.SetSiteStatus(
-                        account,
-                        siteRun,
-                        logMessage: "GeeTest is waiting in the mobile page. Complete it to continue...");
+                    if (!captchaWasSeen)
+                    {
+                        captchaWasSeen = true;
+                        AutomationUi.SetSiteStatus(
+                            account,
+                            siteRun,
+                            logMessage: "Slider verification is ready in the mobile page.");
+                    }
+
+                    if (siteRun.Site == TargetSite.LLWIN
+                        && DateTime.UtcNow >= nextSliderAttemptAt
+                        && sliderAttempts < 2)
+                    {
+                        sliderAttempts++;
+                        var dragResult = SolveAndDragBotionSliderAsync(
+                                driver,
+                                executionContext.SliderCaptchaSolver,
+                                executionContext.CancellationToken)
+                            .GetAwaiter()
+                            .GetResult();
+                        if (!dragResult.IsSuccess)
+                        {
+                            if (sliderAttempts >= 2)
+                            {
+                                AutomationUi.SetSiteStatus(
+                                    account,
+                                    siteRun,
+                                    AccountStatus.Failed,
+                                    $"LLWIN slider verification failed: {dragResult.Message}");
+                                return false;
+                            }
+
+                            TryRefreshBotion(javaScript);
+                            nextSliderAttemptAt = DateTime.UtcNow.AddSeconds(2);
+                        }
+                        else
+                        {
+                            AutomationUi.SetSiteStatus(
+                                account,
+                                siteRun,
+                                logMessage:
+                                    $"LLWIN slider submitted with OMOCaptcha (attempt {sliderAttempts}). Waiting for registration confirmation...");
+                            nextSliderAttemptAt = DateTime.UtcNow.AddSeconds(5);
+                        }
+                    }
                 }
 
                 executionContext.Delay(TimeSpan.FromMilliseconds(500));
@@ -143,6 +200,274 @@ internal static class LobbyMobileWorkflow
                 AccountStatus.Failed,
                 $"Mobile lobby browser error: {exception.Message}");
             return false;
+        }
+    }
+
+    private static bool TryClickRegistrationSubmit(
+        IWebDriver driver,
+        IJavaScriptExecutor javaScript,
+        out string error)
+    {
+        error = string.Empty;
+        try
+        {
+            var submit = driver.FindElements(By.Id("insideRegisterSubmitClick"))
+                .LastOrDefault(IsUsableElement);
+            if (submit is null)
+            {
+                error = "the LLWIN submit button is not visible.";
+                return false;
+            }
+
+            javaScript.ExecuteScript(
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+                submit);
+            submit.Click();
+            return true;
+        }
+        catch (WebDriverException exception)
+        {
+            error = $"the LLWIN submit click failed: {exception.Message}";
+            return false;
+        }
+    }
+
+    private static async Task<SliderDragResult> SolveAndDragBotionSliderAsync(
+        IWebDriver driver,
+        ISliderCaptchaSolver? solver,
+        CancellationToken cancellationToken)
+    {
+        if (solver?.IsConfigured != true)
+        {
+            return SliderDragResult.Failure(
+                "OMOCaptcha GeetestSliderWebTask is not configured.");
+        }
+
+        IWebElement? puzzleWindow = null;
+        IWebElement? sliderButton = null;
+        IWebElement? sliderTrack = null;
+        var deadline = DateTime.UtcNow.AddSeconds(10);
+        while (DateTime.UtcNow < deadline)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            try
+            {
+                puzzleWindow = driver.FindElements(By.CssSelector(".botion_window"))
+                    .LastOrDefault(IsUsableElement);
+                sliderButton = driver.FindElements(By.CssSelector(".botion_btn"))
+                    .LastOrDefault(IsUsableElement);
+                sliderTrack = driver.FindElements(By.CssSelector(".botion_track"))
+                    .LastOrDefault(IsUsableElement);
+                if (puzzleWindow is not null
+                    && sliderButton is not null
+                    && sliderTrack is not null)
+                {
+                    break;
+                }
+            }
+            catch (WebDriverException)
+            {
+                puzzleWindow = null;
+            }
+
+            await Task.Delay(200, cancellationToken).ConfigureAwait(false);
+        }
+
+        if (puzzleWindow is null || sliderButton is null || sliderTrack is null)
+        {
+            return SliderDragResult.Failure(
+                "The Botion slider controls did not become visible.");
+        }
+
+        if (puzzleWindow is not ITakesScreenshot screenshotElement)
+        {
+            return SliderDragResult.Failure(
+                "The Botion puzzle image cannot be captured by Selenium.");
+        }
+
+        byte[] imageBytes;
+        try
+        {
+            imageBytes = screenshotElement.GetScreenshot().AsByteArray;
+        }
+        catch (WebDriverException exception)
+        {
+            return SliderDragResult.Failure(
+                $"Could not capture the Botion puzzle image: {exception.Message}");
+        }
+
+        if (imageBytes.Length == 0)
+        {
+            return SliderDragResult.Failure("The captured Botion puzzle image is empty.");
+        }
+
+        var solution = await solver.SolveAsync(
+                Convert.ToBase64String(imageBytes),
+                cancellationToken)
+            .ConfigureAwait(false);
+        if (!solution.IsSuccess)
+        {
+            return SliderDragResult.Failure(solution.Message);
+        }
+
+        var screenshotWidth = ReadPngWidth(imageBytes);
+        var cssWidth = Math.Max(1, puzzleWindow.Size.Width);
+        var coordinateScale = screenshotWidth > 0
+            ? cssWidth / (double)screenshotWidth
+            : 1d;
+        var requestedOffset = (int)Math.Round(solution.EndX * coordinateScale);
+        var maximumOffset = Math.Max(1, sliderTrack.Size.Width - sliderButton.Size.Width);
+        var dragOffset = Math.Clamp(requestedOffset, 1, maximumOffset);
+
+        cancellationToken.ThrowIfCancellationRequested();
+        try
+        {
+            var actions = new Actions(driver)
+                .MoveToElement(sliderButton)
+                .ClickAndHold()
+                .Pause(TimeSpan.FromMilliseconds(120));
+            var checkpoints = new[] { 0.12, 0.28, 0.46, 0.64, 0.79, 0.91, 1.0 };
+            var verticalOffsets = new[] { 0, 1, 0, -1, 0, 1, 0 };
+            var movedX = 0;
+            var movedY = 0;
+            for (var index = 0; index < checkpoints.Length; index++)
+            {
+                var targetX = index == checkpoints.Length - 1
+                    ? dragOffset
+                    : (int)Math.Round(dragOffset * checkpoints[index]);
+                var targetY = verticalOffsets[index];
+                actions.MoveByOffset(targetX - movedX, targetY - movedY)
+                    .Pause(TimeSpan.FromMilliseconds(35 + index * 7));
+                movedX = targetX;
+                movedY = targetY;
+            }
+
+            actions.Release().Perform();
+        }
+        catch (WebDriverException exception)
+        {
+            return SliderDragResult.Failure(
+                $"Could not drag the Botion slider: {exception.Message}");
+        }
+
+        return new SliderDragResult(true, string.Empty);
+    }
+
+    private static bool IsUsableElement(IWebElement element)
+    {
+        try
+        {
+            return element.Displayed
+                   && element.Enabled
+                   && element.Size.Width > 20
+                   && element.Size.Height > 10;
+        }
+        catch (StaleElementReferenceException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsBotionSliderVisible(IWebDriver driver)
+    {
+        try
+        {
+            return driver.FindElements(By.CssSelector(".botion_window, .botion_btn"))
+                .Any(IsUsableElement);
+        }
+        catch (WebDriverException)
+        {
+            return false;
+        }
+    }
+
+    private static bool IsRegistrationSuccessVisible(IWebDriver driver)
+    {
+        try
+        {
+            return driver.FindElements(By.CssSelector(
+                    ".ui-dialog, [role='dialog'], [class*='registerRechargeDialog']"))
+                .Any(element =>
+                {
+                    try
+                    {
+                        return element.Displayed
+                               && element.Text.Contains(
+                                   "đăng ký thành công",
+                                   StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch (StaleElementReferenceException)
+                    {
+                        return false;
+                    }
+                });
+        }
+        catch (WebDriverException)
+        {
+            return false;
+        }
+    }
+
+    private static void TryDismissRegistrationSuccess(
+        IWebDriver driver,
+        IJavaScriptExecutor javaScript)
+    {
+        try
+        {
+            var close = driver.FindElements(By.CssSelector(
+                    ".ui-dialog-close-box__icon, .ui-dialog-close-box"))
+                .LastOrDefault(IsUsableElement);
+            if (close is null)
+            {
+                return;
+            }
+
+            javaScript.ExecuteScript(
+                "arguments[0].scrollIntoView({block:'center', inline:'center'});",
+                close);
+            close.Click();
+        }
+        catch (WebDriverException)
+        {
+            try
+            {
+                javaScript.ExecuteScript(
+                    "document.querySelector('.ui-dialog-close-box__icon, .ui-dialog-close-box')?.click();");
+            }
+            catch (WebDriverException)
+            {
+                // The bank workflow can still navigate if the popup closes itself.
+            }
+        }
+    }
+
+    private static int ReadPngWidth(byte[] pngBytes)
+    {
+        if (pngBytes.Length < 24
+            || pngBytes[0] != 0x89
+            || pngBytes[1] != 0x50
+            || pngBytes[2] != 0x4E
+            || pngBytes[3] != 0x47)
+        {
+            return 0;
+        }
+
+        return (pngBytes[16] << 24)
+               | (pngBytes[17] << 16)
+               | (pngBytes[18] << 8)
+               | pngBytes[19];
+    }
+
+    private static void TryRefreshBotion(IJavaScriptExecutor javaScript)
+    {
+        try
+        {
+            javaScript.ExecuteScript(
+                "document.querySelector('.botion_refresh')?.click();");
+        }
+        catch (WebDriverException)
+        {
+            // A failed challenge normally refreshes itself; this click is best effort.
         }
     }
 
@@ -339,6 +664,13 @@ internal static class LobbyMobileWorkflow
                 """
                 (() => {
                     const path = String(location.pathname || '').toLowerCase();
+                    const initialBodyText = String(document.body?.innerText || '')
+                        .normalize('NFD')
+                        .replace(/[\u0300-\u036f]/g, '')
+                        .replace(/[đĐ]/g, 'd')
+                        .toLowerCase();
+                    if (/(chuc mung dang ky thanh cong|dang ky thanh cong|registration successful|register success)/i.test(initialBodyText))
+                        return 'success';
                     const storageEntries = [
                         ...Object.entries(window.localStorage || {}),
                         ...Object.entries(window.sessionStorage || {})
@@ -365,6 +697,7 @@ internal static class LobbyMobileWorkflow
                     const normalize = value => String(value || '')
                         .normalize('NFD')
                         .replace(/[\u0300-\u036f]/g, '')
+                        .replace(/[đĐ]/g, 'd')
                         .toLowerCase();
                     const messages = Array.from(document.querySelectorAll(
                         '[role="alert"], [role="status"], .toast, [class*="toast" i], ' +
@@ -376,9 +709,13 @@ internal static class LobbyMobileWorkflow
                         /(dang ky thanh cong|registration successful|register success)/i.test(text)))
                         return 'success';
                     const bodyText = normalize(document.body?.innerText || '');
+                    if (/(chuc mung dang ky thanh cong|dang ky thanh cong|registration successful|register success)/i.test(bodyText))
+                        return 'success';
+                    const visibleCaptcha = Array.from(document.querySelectorAll(
+                        '[id*="captcha" i], [class*="captcha" i], [id*="geetest" i], [class*="geetest" i], [id*="botion" i], [class*="botion" i]'))
+                        .some(visible);
                     if (/(captcha|geetest|botion|xac minh|verification)/i.test(bodyText)
-                        || document.querySelector(
-                            '[id*="captcha" i], [class*="captcha" i], [id*="geetest" i], [class*="geetest" i], [id*="botion" i], [class*="botion" i]'))
+                        || visibleCaptcha)
                         return 'captcha';
                     if (messages.some(text =>
                         /(ten dang nhap da ton tai|username.*exist|already exists|dang ky that bai|registration failed|loi dang ky)/i.test(text)))
@@ -391,6 +728,11 @@ internal static class LobbyMobileWorkflow
         {
             return "pending";
         }
+    }
+
+    private sealed record SliderDragResult(bool IsSuccess, string Message)
+    {
+        public static SliderDragResult Failure(string message) => new(false, message);
     }
 
     private static string ReadBankState(IJavaScriptExecutor javaScript)
@@ -410,6 +752,7 @@ internal static class LobbyMobileWorkflow
                     const normalize = value => String(value || '')
                         .normalize('NFD')
                         .replace(/[\u0300-\u036f]/g, '')
+                        .replace(/[đĐ]/g, 'd')
                         .toLowerCase();
                     const messages = Array.from(document.querySelectorAll(
                         '[role="alert"], [role="status"], .toast, [class*="toast" i], ' +
@@ -493,6 +836,7 @@ internal static class LobbyMobileWorkflow
         const normalize = value => String(value || '')
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[đĐ]/g, 'd')
             .toLowerCase()
             .replace(/\s+/g, ' ')
             .trim();
@@ -551,8 +895,10 @@ internal static class LobbyMobileWorkflow
         };
         const findBy = (inputs, pattern) => inputs.find(input => pattern.test(metadata(input)));
         const clickSubmit = () => {
+            const primarySubmit = document.querySelector('#insideRegisterSubmitClick');
+            if (visible(primarySubmit)) return primarySubmit;
             const candidates = elements('button, [role="button"], a, input[type="submit"]');
-            return candidates.find(el => {
+            return candidates.findLast(el => {
                 const text = normalize(el.innerText || el.textContent || el.value);
                 return text.length < 80
                     && /(dang ky|register|sign up|submit|xac nhan|confirm)/i.test(text)
@@ -601,9 +947,7 @@ internal static class LobbyMobileWorkflow
 
                     const submit = clickSubmit();
                     if (submit) {
-                        submit.removeAttribute('disabled');
-                        submit.click();
-                        finish(true, 'submitted');
+                        finish(true, 'ready-to-submit');
                         return;
                     }
                 }
@@ -638,6 +982,7 @@ internal static class LobbyMobileWorkflow
         const normalize = value => String(value || '')
             .normalize('NFD')
             .replace(/[\u0300-\u036f]/g, '')
+            .replace(/[đĐ]/g, 'd')
             .toLowerCase()
             .replace(/\s+/g, ' ')
             .trim();

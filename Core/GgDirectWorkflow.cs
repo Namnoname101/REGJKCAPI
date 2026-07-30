@@ -19,7 +19,10 @@ public sealed record GgDirectSession(
     string StaticToken,
     string SiteCode,
     string DeviceId,
-    string AppVersion);
+    string AppVersion,
+    string Domain,
+    string SiteName,
+    string? NewJwt = null);
 
 internal static partial class GgDirectWorkflow
 {
@@ -29,7 +32,7 @@ internal static partial class GgDirectWorkflow
     private const string DefaultStaticToken = "b2e3d672-9d88-47a7-81b4-9d7ffc62054f";
     private const string DefaultSiteCode = "2365";
     private const string DefaultGeeGuardAppId = "9ia4hndgblg9xihxcwgdjt9ztg8sjwaf";
-    private const string DefaultAppVersion = "7.3.254";
+    private const string DefaultAppVersion = "7.3.268";
     private const string AgentCode = "456510325";
     private const string MobileUserAgent =
         "Mozilla/5.0 (iPhone; CPU iPhone OS 16_0 like Mac OS X) " +
@@ -48,6 +51,7 @@ internal static partial class GgDirectWorkflow
 
     public static async Task<DirectRegistrationOutcome> RegisterAsync(
         AccountModel account,
+        IGgGeeGuardTokenService? geeGuardTokenService,
         CancellationToken cancellationToken)
     {
         if (!ProxyConfigurationParser.TryParse(account.Proxy, out var proxy, out var proxyError))
@@ -83,7 +87,10 @@ internal static partial class GgDirectWorkflow
             ConfigurePageHeaders(pageClient);
 
             var pageTask = TryGetPageHtmlAsync(pageClient, cancellationToken);
-            var geeTokenTask = GetGeeGuardTokenAsync(proxy, cancellationToken);
+            var geeTokenTask = GetGeeGuardTokenAsync(
+                proxy,
+                geeGuardTokenService,
+                cancellationToken);
             await Task.WhenAll((Task)pageTask, geeTokenTask).ConfigureAwait(false);
 
             var pageHtml = await pageTask.ConfigureAwait(false) ?? string.Empty;
@@ -157,7 +164,9 @@ internal static partial class GgDirectWorkflow
                     staticToken,
                     siteCode,
                     deviceId,
-                    DefaultAppVersion));
+                    DefaultAppVersion,
+                    "www.gg88v.com",
+                    "GG88"));
         }
         catch (OperationCanceledException)
         {
@@ -208,7 +217,11 @@ internal static partial class GgDirectWorkflow
                 gg.DeviceId,
                 gg.AppVersion,
                 DateTimeOffset.UtcNow.ToUnixTimeSeconds(),
-                session.UserName);
+                session.UserName,
+                gg.SiteOrigin,
+                gg.RegistrationUrl,
+                gg.Domain,
+                gg.NewJwt);
 
             client.DefaultRequestHeaders.Remove("platformType");
             var bankResolution = await ResolveBankCodeAsync(
@@ -225,7 +238,7 @@ internal static partial class GgDirectWorkflow
 
             if (string.IsNullOrWhiteSpace(bankCode))
             {
-                return BankFailed($"GG88 does not recognize bank '{account.BankName}'.");
+                return BankFailed($"{gg.SiteName} does not recognize bank '{account.BankName}'.");
             }
 
             var key = GgCrypto.DeriveLoginKey(session.Token, session.UserName);
@@ -244,7 +257,7 @@ internal static partial class GgDirectWorkflow
             if (!TryValidateApiResponse(verifyPassword, out var verifyError))
             {
                 return BankFailed(
-                    $"GG88 withdraw-password verification failed: {verifyError}",
+                    $"{gg.SiteName} withdraw-password verification failed: {verifyError}",
                     verifyPassword.Text);
             }
 
@@ -262,7 +275,7 @@ internal static partial class GgDirectWorkflow
             if (!TryValidateApiResponse(modifyPassword, out var modifyError))
             {
                 return BankFailed(
-                    $"GG88 withdraw-password setup failed: {modifyError}",
+                    $"{gg.SiteName} withdraw-password setup failed: {modifyError}",
                     modifyPassword.Text);
             }
             ApplyRotatedSessionToken(client, modifyPassword, session.UserName, ref key);
@@ -292,7 +305,7 @@ internal static partial class GgDirectWorkflow
             if (!TryValidateApiResponse(bind, out var bindError))
             {
                 return BankFailed(
-                    $"GG88 bank bind failed for bank code '{bankCode}' "
+                    $"{gg.SiteName} bank bind failed for bank code '{bankCode}' "
                     + $"({bankResolution.Source}): {bindError}",
                     bind.Text);
             }
@@ -307,20 +320,20 @@ internal static partial class GgDirectWorkflow
             if (!TryValidateApiResponse(linkedAccounts, out var listError))
             {
                 return BankFailed(
-                    $"GG88 bank verification failed: {listError}",
+                    $"{gg.SiteName} bank verification failed: {listError}",
                     linkedAccounts.Text);
             }
 
             if (!ContainsAccountNumber(linkedAccounts.Text, account.AccountNumber))
             {
                 return BankFailed(
-                    "GG88 accepted the bank bind but the linked account could not be verified.",
+                    $"{gg.SiteName} accepted the bank bind but the linked account could not be verified.",
                     linkedAccounts.Text);
             }
 
             return new DirectBankSetupOutcome(
                 DirectBankSetupStatus.Success,
-                "GG88 direct bank setup completed.",
+                $"{gg.SiteName} direct bank setup completed.",
                 bind.Text);
         }
         catch (OperationCanceledException)
@@ -329,7 +342,7 @@ internal static partial class GgDirectWorkflow
         }
         catch (Exception exception)
         {
-            return BankFailed($"GG88 direct bank setup exception: {exception.Message}");
+            return BankFailed($"{session.Gg?.SiteName ?? "Lobby"} direct bank setup exception: {exception.Message}");
         }
     }
 
@@ -395,7 +408,7 @@ internal static partial class GgDirectWorkflow
             {
                 Content = new ByteArrayContent(Array.Empty<byte>()),
                 Version = HttpVersion.Version20,
-                VersionPolicy = HttpVersionPolicy.RequestVersionOrHigher
+                VersionPolicy = HttpVersionPolicy.RequestVersionOrLower
             };
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("text/plain");
             request.Headers.TryAddWithoutValidation("x-data-mode", "chipher");
@@ -1481,15 +1494,19 @@ internal static partial class GgDirectWorkflow
         string deviceId,
         string appVersion,
         long unixTime,
-        string? username = null)
+        string? username = null,
+        string siteOrigin = SiteOrigin,
+        string registrationUrl = RegistrationUrl,
+        string domain = "www.gg88v.com",
+        string? newJwt = null)
     {
         client.DefaultRequestHeaders.Accept.Clear();
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("application/json"));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("text/plain"));
         client.DefaultRequestHeaders.Accept.Add(new MediaTypeWithQualityHeaderValue("*/*"));
         client.DefaultRequestHeaders.UserAgent.ParseAdd(MobileUserAgent);
-        client.DefaultRequestHeaders.Referrer = new Uri(RegistrationUrl);
-        client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", SiteOrigin);
+        client.DefaultRequestHeaders.Referrer = new Uri(registrationUrl);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("Origin", siteOrigin);
         client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Site", "cross-site");
         client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Mode", "cors");
         client.DefaultRequestHeaders.TryAddWithoutValidation("Sec-Fetch-Dest", "empty");
@@ -1501,16 +1518,20 @@ internal static partial class GgDirectWorkflow
         client.DefaultRequestHeaders.TryAddWithoutValidation("siteCode", siteCode);
         client.DefaultRequestHeaders.TryAddWithoutValidation("language", "vi");
         client.DefaultRequestHeaders.TryAddWithoutValidation("token", token);
+        if (!string.IsNullOrWhiteSpace(newJwt))
+        {
+            client.DefaultRequestHeaders.TryAddWithoutValidation("newJwt", newJwt);
+        }
         client.DefaultRequestHeaders.TryAddWithoutValidation("deviceModel", "Mobile Safari v16.0");
         client.DefaultRequestHeaders.TryAddWithoutValidation("physicalDeviceModel", "unknown");
         client.DefaultRequestHeaders.TryAddWithoutValidation("operatingSystem", "iOS");
         client.DefaultRequestHeaders.TryAddWithoutValidation("deviceBrand", "iPhone");
         client.DefaultRequestHeaders.TryAddWithoutValidation("browserType", "Mobile Safari v16.0");
         client.DefaultRequestHeaders.TryAddWithoutValidation("appSystem", "iOS 16.0");
-        client.DefaultRequestHeaders.TryAddWithoutValidation("domain", "www.gg88v.com");
-        client.DefaultRequestHeaders.TryAddWithoutValidation("webauthnDomain", "www.gg88v.com");
+        client.DefaultRequestHeaders.TryAddWithoutValidation("domain", domain);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("webauthnDomain", domain);
         client.DefaultRequestHeaders.TryAddWithoutValidation("clienttimezone", "+7");
-        client.DefaultRequestHeaders.TryAddWithoutValidation("x-custom-referer", RegistrationUrl);
+        client.DefaultRequestHeaders.TryAddWithoutValidation("x-custom-referer", registrationUrl);
         client.DefaultRequestHeaders.TryAddWithoutValidation("x-version", appVersion);
         client.DefaultRequestHeaders.TryAddWithoutValidation("appVersion", $"v{appVersion}");
         client.DefaultRequestHeaders.TryAddWithoutValidation("browserfingerid", string.Empty);
@@ -1526,7 +1547,7 @@ internal static partial class GgDirectWorkflow
                     created = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     version = 1784857024000L
                 }
-            }, JsonOptions));
+            }));
     }
 
     private static HttpRequestMessage CreateEncryptedRequest(
@@ -1541,7 +1562,7 @@ internal static partial class GgDirectWorkflow
         {
             Content = content,
             Version = HttpVersion.Version20,
-            VersionPolicy = HttpVersionPolicy.RequestVersionOrHigher
+            VersionPolicy = HttpVersionPolicy.RequestVersionOrLower
         };
         request.Headers.TryAddWithoutValidation("x-data-mode", "chipher");
         request.Headers.TryAddWithoutValidation("x-request-id", Guid.NewGuid().ToString());
@@ -1627,22 +1648,47 @@ internal static partial class GgDirectWorkflow
 
     private static async Task<string?> GetGeeGuardTokenAsync(
         ProxyConfiguration? proxy,
+        IGgGeeGuardTokenService? geeGuardTokenService,
         CancellationToken cancellationToken)
     {
+#if DEBUG
+        var diagnosticToken = Environment.GetEnvironmentVariable("VIBECODE_GG_TOKEN_OVERRIDE");
+        if (!string.IsNullOrWhiteSpace(diagnosticToken))
+        {
+            return diagnosticToken.Trim();
+        }
+#endif
         await GeeGuardConcurrency.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
+#if DEBUG
             if (string.Equals(
-                    Environment.GetEnvironmentVariable("VIBECODE_GG_NODE_TOKEN"),
+                    Environment.GetEnvironmentVariable("VIBECODE_GG_BROWSER_TOKEN"),
                     "1",
                     StringComparison.Ordinal))
             {
-                return await GetGeeGuardTokenCoreAsync(proxy, cancellationToken)
+                return await GetGeeGuardTokenWithChromeAsync(proxy, cancellationToken)
                     .ConfigureAwait(false);
             }
+#endif
 
-            return await GetGeeGuardTokenWithChromeAsync(proxy, cancellationToken)
+            if (geeGuardTokenService is not null)
+            {
+                var pooledToken = await geeGuardTokenService.GetGeeGuardTokenAsync(
+                        proxy,
+                        RegistrationUrl,
+                        DefaultGeeGuardAppId,
+                        cancellationToken)
+                    .ConfigureAwait(false);
+                if (!string.IsNullOrWhiteSpace(pooledToken))
+                {
+                    return pooledToken;
+                }
+            }
+
+            var edgeToken = await GetGeeGuardTokenWithEdgeAsync(proxy, cancellationToken)
                 .ConfigureAwait(false);
+            return edgeToken;
         }
         finally
         {
@@ -1721,113 +1767,67 @@ internal static partial class GgDirectWorkflow
             }
         }, cancellationToken);
 
-    private static async Task<string?> GetGeeGuardTokenCoreAsync(
+    private static Task<string?> GetGeeGuardTokenWithEdgeAsync(
         ProxyConfiguration? proxy,
-        CancellationToken cancellationToken)
-    {
-        var scriptPath = ResolveGeeGuardScriptPath();
-        if (scriptPath is null)
+        CancellationToken cancellationToken) =>
+        Task.Run(() =>
         {
-            return null;
-        }
-
-        using var process = new Process
-        {
-            StartInfo = new ProcessStartInfo
+            cancellationToken.ThrowIfCancellationRequested();
+            var profileRoot = Path.Combine(
+                Path.GetTempPath(),
+                "VibecodeGgEdgeToken",
+                Guid.NewGuid().ToString("N"));
+            try
             {
-                FileName = "node",
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
+                using var driver = DriverFactory.CreateEdgeDriver(
+                    profileRoot,
+                    proxy,
+                    deleteProfileOnDispose: true);
+                driver.Navigate().GoToUrl(RegistrationUrl);
+                var js = (IJavaScriptExecutor)driver;
+                var deadline = DateTimeOffset.UtcNow.AddSeconds(15);
+                while (DateTimeOffset.UtcNow < deadline)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    if (js.ExecuteScript("return typeof window.initGeeGuard === 'function';") is true)
+                    {
+                        var token = js.ExecuteAsyncScript(
+                            """
+                            const appId = arguments[0];
+                            const done = arguments[arguments.length - 1];
+                            try {
+                                window.initGeeGuard({ appId }, result => {
+                                    done(result?.data?.gee_token || null);
+                                });
+                            } catch {
+                                done(null);
+                            }
+                            """,
+                            DefaultGeeGuardAppId)?.ToString();
+                        if (!string.IsNullOrWhiteSpace(token))
+                        {
+                            return token;
+                        }
+                    }
+                    Thread.Sleep(100);
+                }
+
+                return null;
             }
-        };
-        process.StartInfo.ArgumentList.Add("--use-env-proxy");
-        process.StartInfo.ArgumentList.Add(scriptPath);
-        process.StartInfo.ArgumentList.Add(DefaultGeeGuardAppId);
-        process.StartInfo.ArgumentList.Add(SiteOrigin);
-        process.StartInfo.ArgumentList.Add(RegistrationUrl);
-
-        if (proxy is not null)
-        {
-            var proxyUri = proxy.ConnectionString;
-            process.StartInfo.Environment["HTTP_PROXY"] = proxyUri;
-            process.StartInfo.Environment["HTTPS_PROXY"] = proxyUri;
-            process.StartInfo.Environment["NO_PROXY"] = string.Empty;
-            process.StartInfo.Environment["no_proxy"] = string.Empty;
-        }
-
-        if (!process.Start())
-        {
-            return null;
-        }
-
-        var outputTask = process.StandardOutput.ReadToEndAsync();
-        var errorTask = process.StandardError.ReadToEndAsync();
-        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
-        timeoutCts.CancelAfter(TimeSpan.FromSeconds(15));
-
-        try
-        {
-            await process.WaitForExitAsync(timeoutCts.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
-        {
-            TryKill(process);
-            throw;
-        }
-        catch (OperationCanceledException)
-        {
-            TryKill(process);
-            return null;
-        }
-
-        var output = (await outputTask.ConfigureAwait(false)).Trim();
-        _ = await errorTask.ConfigureAwait(false);
-        if (process.ExitCode != 0 || string.IsNullOrWhiteSpace(output))
-        {
-            return null;
-        }
-
-        try
-        {
-            using var document = JsonDocument.Parse(output);
-            return document.RootElement.TryGetProperty("token", out var token)
-                ? token.GetString()
-                : null;
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static string? ResolveGeeGuardScriptPath()
-    {
-        var candidates = new[]
-        {
-            RuntimePaths.GetResourcePath("Core", "gg_geetest_token.js"),
-            Path.Combine(AppContext.BaseDirectory, "Core", "gg_geetest_token.js"),
-            Path.Combine(AppContext.BaseDirectory, "gg_geetest_token.js"),
-            Path.Combine(Directory.GetCurrentDirectory(), "Core", "gg_geetest_token.js")
-        };
-        return candidates.FirstOrDefault(File.Exists);
-    }
-
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
+            finally
             {
-                process.Kill(entireProcessTree: true);
+                try
+                {
+                    if (Directory.Exists(profileRoot))
+                    {
+                        Directory.Delete(profileRoot, recursive: true);
+                    }
+                }
+                catch
+                {
+                }
             }
-        }
-        catch
-        {
-            // Best effort process cleanup.
-        }
-    }
+        }, cancellationToken);
 
     private static string? FindValue(string input, Regex regex)
     {

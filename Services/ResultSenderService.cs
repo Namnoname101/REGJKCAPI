@@ -334,6 +334,7 @@ public sealed class ResultSenderService : IResultSenderService
     private static string BuildFailureStep(SiteRunModel siteRun)
     {
         var message = siteRun.LogMessage ?? string.Empty;
+        var isDuplicate = ContainsAny(message, "duplicate", "already", "exists", "đã tồn tại", "da ton tai");
 
         if (ContainsAny(
                 message,
@@ -343,6 +344,29 @@ public sealed class ResultSenderService : IResultSenderService
                 "ma xac minh",
                 "verification code"))
             return "Bước xác minh chưa hoàn tất";
+
+        if (ContainsAny(message, "phone", "mobile", "số điện thoại", "so dien thoai", "sđt"))
+            return isDuplicate
+                ? "Số điện thoại đã được sử dụng"
+                : "Số điện thoại chưa hợp lệ";
+
+        if (ContainsAny(message, "account number", "bank account", "card number", "số tài khoản", "so tai khoan", "stk"))
+            return isDuplicate
+                ? "Số tài khoản đã được sử dụng"
+                : "Số tài khoản ngân hàng chưa hợp lệ";
+
+        if (ContainsAny(message, "username", "user name", "tên đăng nhập", "ten dang nhap"))
+            return isDuplicate
+                ? "Tên đăng nhập đã tồn tại"
+                : "Tên đăng nhập chưa hợp lệ";
+
+        if (ContainsAny(message, "bank", "ngân hàng", "ngan hang"))
+            return "Thông tin ngân hàng đã được xử dụng vùi lòng xài ngân hàng khác !!!";
+
+        if (ContainsAny(message,
+                "legacy browser fallback is disabled",
+                "direct http registration did not complete"))
+            return "Đăng ký tự động không hoàn tất (chưa có bước thử lại)";
 
         // "Direct HTTP registration failed" is part of every direct API
         // failure, not evidence of a transport outage. Match only concrete
@@ -357,12 +381,6 @@ public sealed class ResultSenderService : IResultSenderService
                 "httprequestexception",
                 "direct http exception"))
             return "Kết nối tạm thời gián đoạn";
-
-        if (ContainsAny(message, "bank", "ngân hàng", "account number"))
-            return "Chưa thể cập nhật thông tin ngân hàng";
-
-        if (ContainsAny(message, "duplicate", "already", "exists", "username", "phone"))
-            return "Thông tin đã tồn tại hoặc chưa hợp lệ";
 
         return "Chưa thể hoàn tất";
     }

@@ -16,6 +16,10 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
     private readonly IBrowserSessionPool _browserSessionPool;
     private readonly IBrowserConcurrencyGovernor _browserConcurrencyGovernor;
     private readonly CaptchaSolverOptions _captchaSolverOptions;
+    private readonly IGeetestBrowserTokenService _browserGeetestTokenService;
+    private readonly IGgGeeGuardTokenService _ggGeeGuardTokenService;
+    private readonly IImageCaptchaSolver? _imageCaptchaSolver;
+    private readonly ISliderCaptchaSolver? _sliderCaptchaSolver;
 
     public BrowserAutomationService(
         IOptions<AutomationOptions> options,
@@ -23,13 +27,21 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
         IProfileRepository profileRepository,
         IBrowserSessionPool browserSessionPool,
         IBrowserConcurrencyGovernor browserConcurrencyGovernor,
-        ILogger<BrowserAutomationService> logger)
+        IGeetestBrowserTokenService browserGeetestTokenService,
+        IGgGeeGuardTokenService ggGeeGuardTokenService,
+        ILogger<BrowserAutomationService> logger,
+        IImageCaptchaSolver? imageCaptchaSolver = null,
+        ISliderCaptchaSolver? sliderCaptchaSolver = null)
     {
         _options = options.Value;
         _captchaSolverOptions = captchaSolverOptions.Value;
         _profileRepository = profileRepository;
         _browserSessionPool = browserSessionPool;
         _browserConcurrencyGovernor = browserConcurrencyGovernor;
+        _browserGeetestTokenService = browserGeetestTokenService;
+        _ggGeeGuardTokenService = ggGeeGuardTokenService;
+        _imageCaptchaSolver = imageCaptchaSolver;
+        _sliderCaptchaSolver = sliderCaptchaSolver;
         _logger = logger;
         _browserStartupGate = new SemaphoreSlim(_options.MaxConcurrentBrowserStarts);
     }
@@ -52,6 +64,9 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
         try
         {
             var manager = new BotManager();
+            var browserGeetestTokenService = _options.EnableBrowserFallback
+                ? _browserGeetestTokenService
+                : null;
             await manager.RunMassRegistrationAsync(
                 new[] { account },
                 _options.MaxBrowserThreadsPerJob,
@@ -64,7 +79,11 @@ public sealed class BrowserAutomationService : IBrowserAutomationService, IDispo
                 enableBrowserFallback: _options.EnableBrowserFallback,
                 browserSessionPool: _browserSessionPool,
                 browserConcurrencyGovernor: _browserConcurrencyGovernor,
-                captchaSolverOptions: _captchaSolverOptions);
+                captchaSolverOptions: _captchaSolverOptions,
+                browserGeetestTokenService: browserGeetestTokenService,
+                imageCaptchaSolver: _imageCaptchaSolver,
+                ggGeeGuardTokenService: _ggGeeGuardTokenService,
+                sliderCaptchaSolver: _sliderCaptchaSolver);
         }
         finally
         {

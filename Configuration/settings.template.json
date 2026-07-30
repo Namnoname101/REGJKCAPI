@@ -6,7 +6,7 @@
   "Hosting": {
     "LocalUrl": "http://127.0.0.1:5000",
     "WebhookUrl": "http://127.0.0.1:5001",
-    "OpenBrowser": true
+    "OpenBrowser": false
   },
   "SePay": {
     "Enabled": false,
@@ -15,7 +15,15 @@
     "BankName": "",
     "AccountNumber": "",
     "AccountHolder": "",
-    "TransferPrefix": "NAP"
+    "TransferPrefix": "NAP",
+    "QrBankCode": "",
+    "QrTemplate": "compact",
+    "QrExpirationMinutes": 30,
+    "MinimumTopUpAmount": 10000,
+    "MaximumTopUpAmount": 50000000,
+    "GatewayBaseUrl": "",
+    "GatewayAccessToken": "",
+    "GatewayPollingSeconds": 5
   },
   "Automation": {
     "MaxConcurrentJobs": 1,
@@ -42,7 +50,20 @@
     "UseRegistrationProxy": true,
     "TimeoutSeconds": 90,
     "InitialPollingDelayMilliseconds": 2000,
-    "PollingIntervalMilliseconds": 3000
+    "PollingIntervalMilliseconds": 3000,
+    "LocalGeeTestMode": "NodeFirst",
+    "LocalBrowserMaxSessions": 4,
+    "LocalBrowserMaxUsesPerSession": 20,
+    "LocalBrowserIdleSeconds": 120
+  },
+  "OmoCaptcha": {
+    "Enabled": true,
+    "ApiKey": "OMO_MLUHQF6ISVZZRSVUHUEWHCWB6SPKKT7KO53E6HIRVZTREAUQCACGZBEX1OTWQB1785351575",
+    "ApiBaseUrl": "https://api.omocaptcha.com",
+    "Module": "module_1",
+    "TimeoutSeconds": 90,
+    "InitialPollingDelayMilliseconds": 2000,
+    "MaxPollingDelayMilliseconds": 10000
   },
   "ProxyVn": {
     "ApiKey": "",
