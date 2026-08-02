@@ -173,7 +173,7 @@ public static class DirectBankSetupWorkflow
             return bankList.Outcome;
         }
 
-        var bank = FindMatchingBank(bankList.Banks, account.BankName);
+        var bank = FindMatchingBank(bankList.Banks, account.BankName, account.BankCode);
         if (bank is null)
         {
             return new DirectBankSetupOutcome(
@@ -835,21 +835,83 @@ public static class DirectBankSetupWorkflow
 
     private static BankInfo? FindMatchingBank(
         IReadOnlyList<BankInfo> banks,
-        string targetBankName)
+        string targetBankName,
+        string? targetBankCode)
     {
-        var target = Compact(targetBankName);
-        if (string.IsNullOrWhiteSpace(target))
+        var targets = new List<string>();
+        AddTarget(targets, targetBankName);
+        AddTarget(targets, targetBankCode);
+        if (VietnamBankCatalog.TryResolve(targetBankCode ?? targetBankName, out var catalogBank))
+        {
+            AddTarget(targets, catalogBank.Code);
+            AddTarget(targets, catalogBank.ProviderCode);
+            AddTarget(targets, catalogBank.DisplayName);
+            foreach (var alias in catalogBank.Aliases)
+            {
+                AddTarget(targets, alias);
+            }
+        }
+
+        if (targets.Count == 0)
         {
             return null;
         }
 
-        return banks.FirstOrDefault(bank =>
+        return banks
+            .Select(bank => new
+            {
+                Bank = bank,
+                Score = ScoreBankMatch(bank, targets)
+            })
+            .Where(candidate => candidate.Score > 0)
+            .OrderByDescending(candidate => candidate.Score)
+            .Select(candidate => candidate.Bank)
+            .FirstOrDefault();
+    }
+
+    private static int ScoreBankMatch(BankInfo bank, IReadOnlyList<string> targets)
+    {
+        var candidates = new[]
         {
-            var candidate = Compact(
-                $"{bank.BankLocaleName} {bank.BankEngName} {bank.BankChName} {bank.BankCode}");
-            return candidate.Contains(target, StringComparison.Ordinal)
-                   || target.Contains(candidate, StringComparison.Ordinal);
-        });
+            Compact(bank.BankCode),
+            Compact(bank.BankLocaleName),
+            Compact(bank.BankEngName),
+            Compact(bank.BankChName)
+        }.Where(value => !string.IsNullOrWhiteSpace(value)).ToArray();
+
+        var score = 0;
+        foreach (var target in targets)
+        {
+            foreach (var candidate in candidates)
+            {
+                if (candidate.Equals(target, StringComparison.Ordinal))
+                {
+                    score = Math.Max(score, 1000 + target.Length);
+                }
+                else if (target.Length >= 4
+                         && candidate.Contains(target, StringComparison.Ordinal))
+                {
+                    score = Math.Max(score, 500 + target.Length);
+                }
+                else if (candidate.Length >= 4
+                         && target.Contains(candidate, StringComparison.Ordinal))
+                {
+                    score = Math.Max(score, 300 + candidate.Length);
+                }
+            }
+        }
+
+        return score;
+    }
+
+    private static void AddTarget(List<string> targets, string? value)
+    {
+        var compact = Compact(value);
+        if (!string.IsNullOrWhiteSpace(compact)
+            && !targets.Contains(compact, StringComparer.Ordinal))
+        {
+            targets.Add(compact);
+        }
     }
 
     private static bool IsSuccess(JsonElement root) =>

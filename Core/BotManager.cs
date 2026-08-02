@@ -13,7 +13,12 @@ namespace BAOCODETOOL.Core;
 
 public sealed class BotManager
 {
-    private static readonly SemaphoreSlim LlwinExecutionGate = new(1, 1);
+    private const string ProxyDeadMessage = "Proxy die.";
+    private const string PhoneAlreadyRegisteredMessage =
+        "Số điện thoại đã được đăng ký, vui lòng thử số điện thoại khác.";
+    private const string BankAlreadyUsedMessage =
+        "Tài khoản đã đăng ký nhưng ngân hàng này đã được sử dụng. TK/MK đã được xuất để bạn đăng nhập và đổi ngân hàng.";
+    private static readonly SemaphoreSlim LlwinExecutionGate = new(2, 2);
     private readonly object _runLock = new();
     private readonly ManualResetEventSlim _pauseEvent = new(true);
     private CancellationTokenSource? _cts;
@@ -212,6 +217,8 @@ private async Task RunJobAsync(
     try
     {
         executionContext.Checkpoint();
+        siteRun.RegistrationCompleted = false;
+        siteRun.RequiresManualBankChange = false;
         AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Running, "Queued. Waiting for site slot...");
 
         // Acquire the per-account slot before the global slot. This prevents
@@ -335,8 +342,9 @@ private static async Task<bool> TryVerifyRequiredProxyAsync(
         MarkProxyVerificationFailed(
             account,
             siteRuns,
-            $"Proxy is required and must be valid: {parseError ?? "proxy data is empty."}",
+            ProxyDeadMessage,
             onSiteCompleted);
+        Debug.WriteLine($"Proxy preflight rejected configuration: {parseError ?? "proxy data is empty."}");
         return false;
     }
 
@@ -345,8 +353,9 @@ private static async Task<bool> TryVerifyRequiredProxyAsync(
         MarkProxyVerificationFailed(
             account,
             siteRuns,
-            "SOCKS5 proxy is not supported for registration. Use an HTTP/HTTPS proxy.",
+            ProxyDeadMessage,
             onSiteCompleted);
+        Debug.WriteLine("Proxy preflight rejected SOCKS5 configuration.");
         return false;
     }
 
@@ -378,10 +387,11 @@ private static async Task<bool> TryVerifyRequiredProxyAsync(
 
     if (!connectivity.IsSuccess)
     {
+        Debug.WriteLine($"Proxy preflight failed: {connectivity.Message}");
         MarkProxyVerificationFailed(
             account,
             siteRuns,
-            $"Proxy connection failed: {connectivity.Message} Automation was not started to avoid direct-IP fallback.",
+            ProxyDeadMessage,
             onSiteCompleted);
         return false;
     }
@@ -452,13 +462,14 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
 
             if (outcome.Status == DirectRegistrationStatus.Success)
             {
+                siteRun.RegistrationCompleted = true;
                 if (outcome.Session is null)
                 {
                     AutomationUi.SetSiteStatus(
                         account,
                         siteRun,
                         AccountStatus.Failed,
-                        "Direct HTTP registration succeeded but did not return a session token for bank setup.");
+                        "Tài khoản đã đăng ký nhưng  thể tự động liên kết ngân hàng. Vui lòng đăng nhập để kiểm tra.");
                     handled = true;
                     return true;
                 }
@@ -482,13 +493,55 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
 
                 if (bankOutcome.Status != DirectBankSetupStatus.Success)
                 {
+                    var bankAlreadyUsed = IsBankAccountAlreadyUsed(
+                        bankOutcome.Message,
+                        bankOutcome.RawResponse);
+                    siteRun.RequiresManualBankChange = bankAlreadyUsed;
+                    if (bankAlreadyUsed)
+                    {
+                        ResultWriter.AppendRegisteredAccount(account, siteRun.Site);
+                    }
+
                     AutomationUi.SetSiteStatus(
                         account,
                         siteRun,
                         AccountStatus.Failed,
-                        $"Direct HTTP bank setup failed: {bankOutcome.Message}");
+                        bankAlreadyUsed
+                            ? BankAlreadyUsedMessage
+                            : "Tài khoản đã đăng ký nhưng chưa hoàn tất liên kết ngân hàng. Vui lòng đăng nhập để kiểm tra.");
                     handled = true;
                     return true;
+                }
+
+                if (OfficialAppLoginWorkflow.IsSupported(siteRun.Site))
+                {
+                    AutomationUi.SetSiteStatus(
+                        account,
+                        siteRun,
+                        AccountStatus.Phase1_RegDone,
+                        "Direct bank setup completed. Confirming official PWA login...");
+                    executionContext.Checkpoint();
+                    var appLoginStopwatch = Stopwatch.StartNew();
+                    var appLoginOutcome = await OfficialAppLoginWorkflow.TryLoginAsync(
+                            account,
+                            siteRun.Site,
+                            executionContext.CancellationToken,
+                            captchaSolverOptions,
+                            browserGeetestTokenService)
+                        .ConfigureAwait(false);
+                    appLoginStopwatch.Stop();
+                    metrics.RegistrationMs += appLoginStopwatch.ElapsedMilliseconds;
+
+                    if (appLoginOutcome.Status != OfficialAppLoginStatus.Success)
+                    {
+                        AutomationUi.SetSiteStatus(
+                            account,
+                            siteRun,
+                            AccountStatus.Failed,
+                            $"Official PWA login failed: {appLoginOutcome.Message}");
+                        handled = true;
+                        return true;
+                    }
                 }
 
                 ResultWriter.AppendSuccess(account, siteRun.Site);
@@ -496,7 +549,9 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
                     account,
                     siteRun,
                     AccountStatus.Success,
-                    "Direct HTTP registration and bank setup completed. Saved to success.txt.");
+                    OfficialAppLoginWorkflow.IsSupported(siteRun.Site)
+                        ? "Direct HTTP registration, bank setup, and official PWA login completed. Saved to success.txt."
+                        : "Direct HTTP registration and bank setup completed. Saved to success.txt.");
                 handled = true;
                 return true;
             }
@@ -510,7 +565,7 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
                         account,
                         siteRun,
                         AccountStatus.Failed,
-                        $"Direct HTTP registration unavailable: {outcome.Message} Legacy browser fallback is disabled.");
+                        BuildRegistrationFailureMessage(outcome));
                     handled = true;
                     return true;
                 }
@@ -539,7 +594,7 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
                 account,
                 siteRun,
                 AccountStatus.Failed,
-                $"Direct HTTP registration failed: {outcome.Message}");
+                BuildRegistrationFailureMessage(outcome));
             handled = true;
             return true;
         }
@@ -548,7 +603,7 @@ private static async Task<bool> TryRunDirectHttpRegistrationAsync(
             account,
             siteRun,
             AccountStatus.Failed,
-            "Direct HTTP registration failed after username retry.");
+            "Tên đăng nhập đã tồn tại, vui lòng thử lại.");
         handled = true;
         return true;
     }
@@ -820,15 +875,23 @@ private static void RunSingleSiteInBrowser(
 
         if (!registrationSucceeded)
         {
-            if (siteRun.Status != AccountStatus.Failed)
-            {
-                AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Registration phase failed.");
-            }
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Failed,
+                BuildRegistrationFailureMessage(siteRun.LogMessage));
 
             return;
         }
 
-        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Phase1_RegDone, "Registration completed. Starting bank setup...");
+        siteRun.RegistrationCompleted = true;
+
+        AutomationUi.SetSiteStatus(
+            account,
+            siteRun,
+            AccountStatus.Phase1_RegDone,
+            "Registration completed. Starting bank setup...");
+
         executionContext.Checkpoint();
         var bankSetupStopwatch = Stopwatch.StartNew();
         var bankSetupSucceeded = strategy.ExecuteBankSetup(driver, account, siteRun, executionContext);
@@ -836,12 +899,47 @@ private static void RunSingleSiteInBrowser(
         metrics.BankSetupMs = bankSetupStopwatch.ElapsedMilliseconds;
         if (!bankSetupSucceeded)
         {
-            if (siteRun.Status != AccountStatus.Failed)
+            var bankAlreadyUsed = IsBankAccountAlreadyUsed(siteRun.LogMessage);
+            siteRun.RequiresManualBankChange = bankAlreadyUsed;
+            if (bankAlreadyUsed)
             {
-                AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, "Bank setup phase failed.");
+                ResultWriter.AppendRegisteredAccount(account, siteRun.Site);
             }
 
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Failed,
+                bankAlreadyUsed
+                    ? BankAlreadyUsedMessage
+                    : "Tài khoản đã đăng ký nhưng chưa hoàn tất liên kết ngân hàng. Vui lòng đăng nhập để kiểm tra.");
+
             return;
+        }
+
+        if (OfficialAppLoginWorkflow.IsSupported(siteRun.Site))
+        {
+            AutomationUi.SetSiteStatus(
+                account,
+                siteRun,
+                AccountStatus.Phase1_RegDone,
+                "Bank setup completed. Confirming official PWA login...");
+            executionContext.Checkpoint();
+            var appLoginOutcome = OfficialAppLoginWorkflow.TryLoginAsync(
+                    account,
+                    siteRun.Site,
+                    executionContext.CancellationToken)
+                .GetAwaiter()
+                .GetResult();
+            if (appLoginOutcome.Status != OfficialAppLoginStatus.Success)
+            {
+                AutomationUi.SetSiteStatus(
+                    account,
+                    siteRun,
+                    AccountStatus.Failed,
+                    $"Official PWA login failed: {appLoginOutcome.Message}");
+                return;
+            }
         }
 
         executionContext.Checkpoint();
@@ -854,9 +952,88 @@ private static void RunSingleSiteInBrowser(
     }
     catch (Exception ex)
     {
-        AutomationUi.SetSiteStatus(account, siteRun, AccountStatus.Failed, $"Failed: {ex.Message}");
+        Debug.WriteLine($"Browser workflow failed for {siteRun.Site}: {ex}");
+        AutomationUi.SetSiteStatus(
+            account,
+            siteRun,
+            AccountStatus.Failed,
+            siteRun.RegistrationCompleted
+                ? "Tài khoản đã đăng ký nhưng chưa hoàn tất xử lý tự động. Vui lòng đăng nhập để kiểm tra."
+                : "Đăng ký chưa hoàn tất, vui lòng thử lại.");
     }
 }
+
+    private static string BuildRegistrationFailureMessage(DirectRegistrationOutcome outcome)
+    {
+        var combined = $"{outcome.Message}\n{outcome.RawResponse}";
+        return BuildRegistrationFailureMessage(combined, outcome.UsernameConflict);
+    }
+
+    private static string BuildRegistrationFailureMessage(
+        string? message,
+        bool usernameConflict = false)
+    {
+        var value = message ?? string.Empty;
+        if (IsPhoneAlreadyRegistered(value))
+        {
+            return PhoneAlreadyRegisteredMessage;
+        }
+
+        if (ContainsAny(value, "proxy", "connection", "network", "timed out", "timeout"))
+        {
+            return ProxyDeadMessage;
+        }
+
+        if (ContainsAny(value, "captcha", "geetest", "verification"))
+        {
+            return "Xác minh chưa hoàn tất, vui lòng thử lại.";
+        }
+
+        if (usernameConflict)
+        {
+            return "Tên đăng nhập đã tồn tại, vui lòng thử lại.";
+        }
+
+        return "Đăng ký chưa hoàn tất, vui lòng thử lại.";
+    }
+
+    private static bool IsPhoneAlreadyRegistered(string value)
+    {
+        var identifiesPhone = ContainsAny(
+            value,
+            "phone",
+            "mobile",
+            "số điện thoại",
+            "so dien thoai");
+        var identifiesConflict = ContainsAny(
+            value,
+            "already",
+            "exists",
+            "registered",
+            "used",
+            "đã được đăng ký",
+            "đã được đăng kí",
+            "đã tồn tại");
+        return identifiesPhone && identifiesConflict;
+    }
+
+    private static bool IsBankAccountAlreadyUsed(string? message, string? rawResponse = null)
+    {
+        var value = $"{message}\n{rawResponse}";
+        return ContainsAny(
+            value,
+            "đã được liên kết bởi một thành viên khác",
+            "tài khoản rút tiền đó đã được liên kết",
+            "already linked by another",
+            "already bound to another",
+            "used by another member",
+            "bank account already used",
+            "bank card already used",
+            "duplicate bank account");
+    }
+
+    private static bool ContainsAny(string value, params string[] terms) =>
+        terms.Any(term => value.Contains(term, StringComparison.OrdinalIgnoreCase));
 
     private CancellationTokenSource BeginRun(CancellationToken cancellationToken)
     {

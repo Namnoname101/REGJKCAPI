@@ -28,6 +28,7 @@ public static class RuntimePaths
     [
         "Users",
         "Jobs",
+        "CreatedAccountHistories",
         "Transactions",
         "SePayWebhookTransactions",
         "SePayPaymentRequests"
@@ -46,6 +47,7 @@ public static class RuntimePaths
     public static string SettingsPath => Path.Combine(RootDirectory, "settings.json");
     public static string DatabasePath => Path.Combine(DataDirectory, "vibecodereg.db");
     public static string AllowedUsersPath => Path.Combine(DataDirectory, "allowed_users.json");
+    public static string ActivityLogChatPath => Path.Combine(DataDirectory, "activity_log_chat_id.txt");
     public static string ProfilesDataPath => Path.Combine(DataDirectory, "profiles_data.json");
     public static string SuccessPath => Path.Combine(DataDirectory, "success.txt");
     public static string WebRootPath => Path.Combine(ResourcesDirectory, "wwwroot");

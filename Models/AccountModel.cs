@@ -55,6 +55,9 @@ public partial class AccountModel : ObservableObject
     private string _bankName = string.Empty;
 
     [ObservableProperty]
+    private string _bankCode = string.Empty;
+
+    [ObservableProperty]
     private string _branch = string.Empty;
 
     [ObservableProperty]

@@ -1,7 +1,9 @@
 {
   "Telegram": {
     "BotToken": "",
-    "AdminChatId": 0
+    "AdminChatId": 0,
+    "AdminChatIds": [0],
+    "RegistrationPricePerSite": 200
   },
   "Hosting": {
     "LocalUrl": "http://127.0.0.1:5000",

@@ -552,12 +552,20 @@ public sealed class BrowserGeetestTokenPool :
                         """
                         const appId = arguments[0];
                         const done = arguments[arguments.length - 1];
+                        let completed = false;
+                        const finish = value => {
+                            if (completed) return;
+                            completed = true;
+                            clearTimeout(timer);
+                            done(value || null);
+                        };
+                        const timer = setTimeout(() => finish(null), 4000);
                         try {
                             window.initGeeGuard({ appId }, result => {
-                                done(result?.data?.gee_token || null);
+                                finish(result?.data?.gee_token || null);
                             });
                         } catch {
-                            done(null);
+                            finish(null);
                         }
                         """,
                         appId)

@@ -2,6 +2,11 @@ using System.Collections.Concurrent;
 using System.ComponentModel;
 using System.Net;
 using System.Text;
+using System.Text.RegularExpressions;
+using BAOCODETOOL.Core;
+using BAOCODETOOL.Data;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using BAOCODETOOL.Models;
 using Microsoft.Extensions.Logging;
 using Telegram.Bot;
@@ -16,14 +21,17 @@ public sealed class ResultSenderService : IResultSenderService
     private static readonly TimeSpan MinimumEditInterval = TimeSpan.FromSeconds(1.5);
     private readonly ITelegramBotClient _botClient;
     private readonly ILogger<ResultSenderService> _logger;
+    private readonly IServiceScopeFactory _scopeFactory;
     private readonly ConcurrentDictionary<Guid, TrackingState> _tracking = new();
 
     public ResultSenderService(
         ITelegramBotClient botClient,
-        ILogger<ResultSenderService> logger)
+        ILogger<ResultSenderService> logger,
+        IServiceScopeFactory scopeFactory)
     {
         _botClient = botClient;
         _logger = logger;
+        _scopeFactory = scopeFactory;
     }
 
     public async Task<RegistrationJob> CreateJobAsync(
@@ -31,6 +39,8 @@ public sealed class ResultSenderService : IResultSenderService
         AccountModel account,
         bool isBulk,
         Guid batchId,
+        decimal registrationPricePerSite,
+        string chargeReferenceId,
         CancellationToken cancellationToken)
     {
         var selectedRuns = account.SiteRuns.Where(siteRun => siteRun.IsSelected).ToList();
@@ -50,7 +60,9 @@ public sealed class ResultSenderService : IResultSenderService
             ChatId = chatId,
             Account = account,
             StatusMessageId = statusMessage.MessageId,
-            IsBulk = isBulk
+            IsBulk = isBulk,
+            RegistrationPricePerSite = registrationPricePerSite,
+            ChargeReferenceId = chargeReferenceId
         };
 
         var state = new TrackingState(initialText);
@@ -73,7 +85,20 @@ public sealed class ResultSenderService : IResultSenderService
     }
 
     public Task JobStartedAsync(RegistrationJob job, CancellationToken cancellationToken) =>
-        RefreshSafelyAsync(job, force: true, cancellationToken);
+        NotifyJobStartedAsync(job, cancellationToken);
+
+    private async Task NotifyJobStartedAsync(RegistrationJob job, CancellationToken cancellationToken)
+    {
+        await RefreshSafelyAsync(job, force: true, cancellationToken);
+        var userLabel = await GetActivityUserLabelAsync(job.ChatId, cancellationToken);
+        await SendActivityLogAsync(
+            "🚀 <b>BẮT ĐẦU ĐĂNG KÝ</b>\n" +
+            "━━━━━━━━━━━━━━━━━━━━\n" +
+            $"👤 Người dùng: {userLabel}\n" +
+            $"🌐 Game: <b>{Html(job.Account.SelectedSitesText)}</b>\n" +
+            $"🆔 Job: <code>{job.Id.ToString()[..8]}</code>",
+            cancellationToken);
+    }
 
     public async Task JobCompletedAsync(
         RegistrationJob job,
@@ -89,30 +114,118 @@ public sealed class ResultSenderService : IResultSenderService
             StopTracking(job);
         }
 
-        if (remainingJobsForUser != 0)
+        if (job.RefundedAmount > 0m)
         {
-            return;
+            try
+            {
+                await _botClient.SendMessage(
+                    job.ChatId,
+                    "💸 <b>ĐÃ HOÀN PHÍ SITE LỖI</b>\n" +
+                    "━━━━━━━━━━━━━━━━━━━━\n" +
+                    $"❌ Site lỗi: <b>{Html(job.RefundedSites)}</b>\n" +
+                    $"🔢 Số site hoàn: <b>{job.RefundedSiteCount:N0}</b>\n" +
+                    $"💰 Đã hoàn: <b>{job.RefundedAmount:N0} KJC Xu</b>\n\n" +
+                    "Các site đăng ký thành công vẫn được tính phí.",
+                    ParseMode.Html,
+                    cancellationToken: cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Could not send registration refund notification. JobId={JobId}",
+                    job.Id);
+            }
         }
 
-        var completionText = job.IsBulk
-            ? $"✅ <b>{BrandName} đã xử lý xong toàn bộ danh sách.</b>\nBạn có thể tiếp tục đăng ký hoặc theo dõi yêu cầu khác:"
-            : $"✅ <b>{BrandName} đã hoàn tất yêu cầu.</b>\nBạn có thể tiếp tục đăng ký hoặc sử dụng dịch vụ khác:";
+        if (remainingJobsForUser == 0)
+        {
+            var completionText = job.IsBulk
+                ? $"✅ <b>{BrandName} đã xử lý xong toàn bộ danh sách.</b>\nBạn có thể tiếp tục đăng ký hoặc theo dõi yêu cầu khác:"
+                : $"✅ <b>{BrandName} đã hoàn tất yêu cầu.</b>\nBạn có thể tiếp tục đăng ký hoặc sử dụng dịch vụ khác:";
 
+            try
+            {
+                await _botClient.SendMessage(
+                    job.ChatId,
+                    completionText,
+                    ParseMode.Html,
+                    replyMarkup: MainMenuKeyboard(),
+                    cancellationToken: cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                _logger.LogWarning(
+                    exception,
+                    "Could not send the final Telegram completion message. JobId={JobId}",
+                    job.Id);
+            }
+        }
+
+        var selectedRuns = job.Account.SiteRuns.Where(siteRun => siteRun.IsSelected).ToList();
+        var successCount = selectedRuns.Count(siteRun => siteRun.Status == AccountStatus.Success);
+        var statusIcon = successCount == selectedRuns.Count && selectedRuns.Count > 0 ? "✅" : "❌";
+        var userLabel = await GetActivityUserLabelAsync(job.ChatId, cancellationToken);
+        var details = selectedRuns.Count == 0
+            ? "• Không có game được chọn"
+            : string.Join("\n", selectedRuns.Select(siteRun =>
+                siteRun.Status == AccountStatus.Success
+                    ? $"• ✅ <b>{Html(siteRun.Site.ToString())}</b> — Thành công"
+                    : $"• ❌ <b>{Html(siteRun.Site.ToString())}</b> — {Html(BuildFailureStep(siteRun))}"));
+
+        await SendActivityLogAsync(
+            $"{statusIcon} <b>KẾT QUẢ ĐĂNG KÝ</b>\n" +
+            "━━━━━━━━━━━━━━━━━━━━\n" +
+            $"👤 Người dùng: {userLabel}\n" +
+            $"🌐 Game: <b>{Html(job.Account.SelectedSitesText)}</b>\n" +
+            $"📊 Kết quả: <b>{successCount}/{selectedRuns.Count}</b> thành công\n\n" +
+            $"<b>Chi tiết:</b>\n{details}",
+            cancellationToken);
+    }
+
+    private async Task<string> GetActivityUserLabelAsync(long chatId, CancellationToken cancellationToken)
+    {
         try
         {
+            using var scope = _scopeFactory.CreateScope();
+            var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
+            var username = await db.Users
+                .Where(user => user.ChatId == chatId)
+                .Select(user => user.Username)
+                .FirstOrDefaultAsync(cancellationToken);
+            if (!string.IsNullOrWhiteSpace(username))
+            {
+                return "<code>@" + Html(username.Trim().TrimStart('@')) + "</code>";
+            }
+        }
+        catch (Exception exception)
+        {
+            _logger.LogDebug(exception, "Could not resolve Telegram username for activity log. ChatId={ChatId}", chatId);
+        }
+
+        return "<code>không có username</code>";
+    }
+
+    private async Task SendActivityLogAsync(string text, CancellationToken cancellationToken)
+    {
+        try
+        {
+            if (!File.Exists(RuntimePaths.ActivityLogChatPath)
+                || !long.TryParse(File.ReadAllText(RuntimePaths.ActivityLogChatPath).Trim(), out var groupChatId)
+                || groupChatId >= 0)
+            {
+                return;
+            }
+
             await _botClient.SendMessage(
-                job.ChatId,
-                completionText,
+                groupChatId,
+                text,
                 ParseMode.Html,
-                replyMarkup: MainMenuKeyboard(),
                 cancellationToken: cancellationToken);
         }
         catch (Exception exception)
         {
-            _logger.LogWarning(
-                exception,
-                "Could not send the final Telegram completion message. JobId={JobId}",
-                job.Id);
+            _logger.LogWarning(exception, "Could not send activity log to the configured Telegram group.");
         }
     }
 
@@ -256,7 +369,8 @@ public sealed class ResultSenderService : IResultSenderService
         }
 
         var anySuccess = selectedRuns.Any(siteRun => siteRun.Status == AccountStatus.Success);
-        if (!anySuccess)
+        var hasRegisteredAccount = selectedRuns.Any(siteRun => siteRun.RegistrationCompleted);
+        if (!anySuccess && !hasRegisteredAccount)
         {
             var name = job.IsBulk ? $": {Html(account.FullName)}" : string.Empty;
             return $"❌ <b>THẤT BẠI{name}</b> — Tất cả các trang đều lỗi.\n\n" +
@@ -278,10 +392,16 @@ public sealed class ResultSenderService : IResultSenderService
         var account = job.Account;
         var successCount = account.SiteRuns.Count(siteRun =>
             siteRun.IsSelected && siteRun.Status == AccountStatus.Success);
+        var registeredCount = account.SiteRuns.Count(siteRun =>
+            siteRun.IsSelected && siteRun.RegistrationCompleted);
         var heading = hasFailures
-            ? job.IsBulk
-                ? $"⚠️ <b>HOÀN TẤT MỘT PHẦN: {Html(account.FullName)}</b> — {successCount}/{selectedRunCount} dịch vụ thành công\n"
-                : $"⚠️ <b>HOÀN TẤT MỘT PHẦN</b> — {successCount}/{selectedRunCount} dịch vụ thành công\n"
+            ? successCount == 0 && registeredCount > 0
+                ? job.IsBulk
+                    ? $"⚠️ <b>TÀI KHOẢN ĐÃ ĐƯỢC ĐĂNG KÝ: {Html(account.FullName)}</b> — cần xử lý ngân hàng thủ công\n"
+                    : "⚠️ <b>TÀI KHOẢN ĐÃ ĐƯỢC ĐĂNG KÝ</b> — cần xử lý ngân hàng thủ công\n"
+                : job.IsBulk
+                    ? $"⚠️ <b>HOÀN TẤT MỘT PHẦN: {Html(account.FullName)}</b> — {successCount}/{selectedRunCount} dịch vụ thành công\n"
+                    : $"⚠️ <b>HOÀN TẤT MỘT PHẦN</b> — {successCount}/{selectedRunCount} dịch vụ thành công\n"
             : job.IsBulk
                 ? $"✅ <b>HOÀN TẤT: {Html(account.FullName)}</b>\n"
                 : "✅ <b>HOÀN TẤT!</b>\n";
@@ -334,7 +454,23 @@ public sealed class ResultSenderService : IResultSenderService
     private static string BuildFailureStep(SiteRunModel siteRun)
     {
         var message = siteRun.LogMessage ?? string.Empty;
-        var isDuplicate = ContainsAny(message, "duplicate", "already", "exists", "đã tồn tại", "da ton tai");
+        var isDuplicate = ContainsAny(
+            message,
+            "duplicate",
+            "already",
+            "exists",
+            "registered",
+            "đã tồn tại",
+            "đã được đăng ký",
+            "đã được đăng kí",
+            "đã được sử dụng",
+            "da ton tai");
+
+        if (siteRun.RequiresManualBankChange)
+            return "Ngân hàng đã được sử dụng; TK/MK đã xuất để bạn đăng nhập và đổi ngân hàng";
+
+        if (ContainsAny(message, "proxy die"))
+            return "Proxy die";
 
         if (ContainsAny(
                 message,
@@ -346,9 +482,15 @@ public sealed class ResultSenderService : IResultSenderService
             return "Bước xác minh chưa hoàn tất";
 
         if (ContainsAny(message, "phone", "mobile", "số điện thoại", "so dien thoai", "sđt"))
+        {
             return isDuplicate
-                ? "Số điện thoại đã được sử dụng"
-                : "Số điện thoại chưa hợp lệ";
+                ? "Số điện thoại đã được đăng ký, vui lòng thử số điện thoại khác"
+                : "Số điện thoại không hợp lệ, vui lòng thử số điện thoại khác";
+        }
+
+        if (siteRun.RegistrationCompleted
+            && ContainsAny(message, "bank", "ngân hàng", "ngan hang", "account number", "card number"))
+            return "Tài khoản đã đăng ký nhưng chưa hoàn tất ngân hàng; hãy đăng nhập để kiểm tra";
 
         if (ContainsAny(message, "account number", "bank account", "card number", "số tài khoản", "so tai khoan", "stk"))
             return isDuplicate
@@ -387,6 +529,18 @@ public sealed class ResultSenderService : IResultSenderService
 
     private static bool ContainsAny(string value, params string[] terms) =>
         terms.Any(term => value.Contains(term, StringComparison.OrdinalIgnoreCase));
+
+    private static string CompactWebsiteError(string value)
+    {
+        var normalized = Regex.Replace(value, @"\s+", " ").Trim();
+        if (normalized.Length == 0)
+            return string.Empty;
+
+        // Do not relay raw HTML, credentials, or a full upstream response to
+        // the monitoring group. The first concise error is enough to diagnose.
+        normalized = Regex.Replace(normalized, "<.*?>", string.Empty).Trim();
+        return normalized.Length <= 180 ? normalized : normalized[..177] + "...";
+    }
 
     private void StopTracking(RegistrationJob job)
     {

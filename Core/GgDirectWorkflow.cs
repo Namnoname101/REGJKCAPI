@@ -224,11 +224,14 @@ internal static partial class GgDirectWorkflow
                 gg.NewJwt);
 
             client.DefaultRequestHeaders.Remove("platformType");
+            var requestedBank = string.IsNullOrWhiteSpace(account.BankCode)
+                ? account.BankName
+                : account.BankCode;
             var bankResolution = await ResolveBankCodeAsync(
                     client,
                     gg.StaticToken,
                     gg.SiteCode,
-                    account.BankName,
+                    requestedBank,
                     cancellationToken)
                 .ConfigureAwait(false);
             var bankCode = bankResolution.Code;
@@ -679,10 +682,13 @@ internal static partial class GgDirectWorkflow
                 return false;
             }
 
-            var bankCode = FindBankCode(template, account.BankName)
-                           ?? FindBankCode(withdrawInfoRoot, account.BankName)
-                           ?? FindBankCode(rulesRoot, account.BankName)
-                           ?? FindKnownVietnameseBankCode(account.BankName);
+            var requestedBank = string.IsNullOrWhiteSpace(account.BankCode)
+                ? account.BankName
+                : account.BankCode;
+            var bankCode = FindBankCode(template, requestedBank)
+                           ?? FindBankCode(withdrawInfoRoot, requestedBank)
+                           ?? FindBankCode(rulesRoot, requestedBank)
+                           ?? FindKnownVietnameseBankCode(requestedBank);
             if (string.IsNullOrWhiteSpace(bankCode))
             {
                 error = $"GG88 bank rules did not contain bank '{account.BankName}'.";
@@ -967,37 +973,7 @@ internal static partial class GgDirectWorkflow
     }
 
     private static string? FindKnownVietnameseBankCode(string bankName)
-    {
-        var normalized = Compact(bankName);
-        return normalized switch
-        {
-            "vietcombank" or "nganhangngoaithuongvietnam" or "vcb" => "VIETCOMB",
-            "techcombank" or "nganhangkythuongvietnam" or "tcb" => "TECHCOMB",
-            "vietinbank" or "nganhangcongthuongvietnam" or "ctg" or "vtb" => "VIETINBA",
-            "bidv" or "nganhangdautuvaphattrienvietnam" => "BIDV",
-            "acb" or "nganhangachau" => "ACB",
-            "mbbank" or "mb" or "nganhangquandoi" or "mbb" => "MBBANK",
-            "vpbank" or "vpb" => "VPBANK",
-            "vib" => "VIB",
-            "tpbank" or "tpb" => "TPBANK",
-            "sacombank" or "stb" => "SBANK",
-            "hdbank" or "hdb" => "HDBANK",
-            "shb" => "SHB",
-            "eximbank" or "eib" => "EXIM",
-            "msb" or "maritimebank" => "MARIBANK",
-            "ocb" => "OCBANK",
-            "seabank" or "ssb" => "SEABANK",
-            "abbank" or "abb" => "ABB",
-            "namabank" or "nab" => "NABANK",
-            "pvcombank" or "pvcb" => "PVBANK",
-            "vietabank" or "vab" => "VABANK",
-            "bacabank" or "bab" => "BAB",
-            "kienlongbank" or "klb" => "KLBANK",
-            "ncb" => "NCB",
-            "lpbank" or "lienvietpostbank" or "lpb" => "LVPBANK",
-            _ => null
-        };
-    }
+        => VietnamBankCatalog.FindProviderCode(bankName);
 
     private static IReadOnlyDictionary<string, string> BuildBankFormValues(
         JsonElement root,
@@ -1733,12 +1709,20 @@ internal static partial class GgDirectWorkflow
                             """
                             const appId = arguments[0];
                             const done = arguments[arguments.length - 1];
+                            let completed = false;
+                            const finish = value => {
+                                if (completed) return;
+                                completed = true;
+                                clearTimeout(timer);
+                                done(value || null);
+                            };
+                            const timer = setTimeout(() => finish(null), 4000);
                             try {
                                 window.initGeeGuard({ appId }, result => {
-                                    done(result?.data?.gee_token || null);
+                                    finish(result?.data?.gee_token || null);
                                 });
                             } catch {
-                                done(null);
+                                finish(null);
                             }
                             """,
                             DefaultGeeGuardAppId)?.ToString();
@@ -1795,12 +1779,20 @@ internal static partial class GgDirectWorkflow
                             """
                             const appId = arguments[0];
                             const done = arguments[arguments.length - 1];
+                            let completed = false;
+                            const finish = value => {
+                                if (completed) return;
+                                completed = true;
+                                clearTimeout(timer);
+                                done(value || null);
+                            };
+                            const timer = setTimeout(() => finish(null), 4000);
                             try {
                                 window.initGeeGuard({ appId }, result => {
-                                    done(result?.data?.gee_token || null);
+                                    finish(result?.data?.gee_token || null);
                                 });
                             } catch {
-                                done(null);
+                                finish(null);
                             }
                             """,
                             DefaultGeeGuardAppId)?.ToString();

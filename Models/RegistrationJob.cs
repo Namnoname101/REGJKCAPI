@@ -14,6 +14,16 @@ public sealed class RegistrationJob
 
     public bool IsBulk { get; init; }
 
+    public decimal RegistrationPricePerSite { get; init; }
+
+    public string ChargeReferenceId { get; init; } = string.Empty;
+
+    public decimal RefundedAmount { get; internal set; }
+
+    public int RefundedSiteCount { get; internal set; }
+
+    public string RefundedSites { get; internal set; } = string.Empty;
+
     public DateTimeOffset CreatedAt { get; init; } = DateTimeOffset.UtcNow;
 
     public DateTimeOffset? StartedAt { get; internal set; }
@@ -29,4 +39,6 @@ public sealed class RegistrationJob
     // finalization, preventing negative processing counters and duplicate
     // success/failure metrics.
     internal int CompletionClaimed;
+
+    internal int RefundClaimed;
 }

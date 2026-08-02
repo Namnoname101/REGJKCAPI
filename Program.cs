@@ -119,6 +119,7 @@ builder.Services
         options => !string.IsNullOrWhiteSpace(options.BotToken),
         "Telegram bot token is missing. Set Telegram:BotToken in the local settings file or Telegram__BotToken in the environment.")
     .Validate(options => options.AdminChatId != 0, "Telegram:AdminChatId must be configured.")
+    .Validate(options => options.RegistrationPricePerSite > 0, "Telegram:RegistrationPricePerSite must be greater than zero.")
     .ValidateOnStart();
 
 builder.Services
@@ -305,6 +306,28 @@ using (var scope = app.Services.CreateScope())
 {
     var db = scope.ServiceProvider.GetRequiredService<AppDbContext>();
     db.Database.EnsureCreated();
+
+    // Jobs are queued in memory, so a persisted Running row cannot be resumed
+    // after the process is stopped. Close those rows before the dashboard and
+    // workers become available so the UI does not report phantom jobs.
+    var interruptedJobs = await db.Jobs
+        .Where(job => job.Status == "Running")
+        .ToListAsync();
+    if (interruptedJobs.Count > 0)
+    {
+        var interruptedAt = DateTime.UtcNow;
+        foreach (var job in interruptedJobs)
+        {
+            job.Status = "Failed";
+            job.EndTime = interruptedAt;
+            job.Logs = "Bị gián đoạn vì bot đã dừng trước khi hoàn tất.";
+        }
+
+        await db.SaveChangesAsync();
+        app.Logger.LogWarning(
+            "Marked {Count} persisted running jobs as interrupted during startup.",
+            interruptedJobs.Count);
+    }
 }
 
 app.UseDefaultFiles();

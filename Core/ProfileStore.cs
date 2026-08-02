@@ -23,6 +23,7 @@ public static class ProfileStore
         public string Level2Password { get; set; } = string.Empty;
         public string AccountNumber { get; set; } = string.Empty;
         public string BankName { get; set; } = string.Empty;
+        public string BankCode { get; set; } = string.Empty;
         public string Branch { get; set; } = string.Empty;
         public string Proxy { get; set; } = string.Empty;
         public string UserAgent { get; set; } = string.Empty;
@@ -44,6 +45,7 @@ public static class ProfileStore
                 Level2Password = p.Level2Password,
                 AccountNumber = p.AccountNumber,
                 BankName = p.BankName,
+                BankCode = p.BankCode,
                 Branch = p.Branch,
                 Proxy = p.Proxy,
                 UserAgent = p.UserAgent,
@@ -115,6 +117,7 @@ public static class ProfileStore
                     Level2Password = item.Level2Password,
                     AccountNumber = item.AccountNumber,
                     BankName = item.BankName,
+                    BankCode = item.BankCode,
                     Branch = item.Branch,
                     Proxy = item.Proxy,
                     UserAgent = item.UserAgent

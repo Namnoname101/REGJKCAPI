@@ -173,12 +173,12 @@ internal static class LobbyMobileWorkflow
                                 siteRun,
                                 logMessage:
                                     $"LLWIN slider submitted with OMOCaptcha (attempt {sliderAttempts}). Waiting for registration confirmation...");
-                            nextSliderAttemptAt = DateTime.UtcNow.AddSeconds(5);
+                            nextSliderAttemptAt = DateTime.UtcNow.AddSeconds(3);
                         }
                     }
                 }
 
-                executionContext.Delay(TimeSpan.FromMilliseconds(500));
+                executionContext.Delay(TimeSpan.FromMilliseconds(250));
             }
 
             AutomationUi.SetSiteStatus(
@@ -567,7 +567,7 @@ internal static class LobbyMobileWorkflow
                     return false;
                 }
 
-                executionContext.Delay(TimeSpan.FromMilliseconds(500));
+                executionContext.Delay(TimeSpan.FromMilliseconds(250));
             }
 
             AutomationUi.SetSiteStatus(

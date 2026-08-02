@@ -36,6 +36,30 @@ public sealed class AppDbContext : DbContext
                 );
                 CREATE INDEX IF NOT EXISTS ""IX_Jobs_UserId"" ON ""Jobs"" (""UserId"");
 
+                CREATE TABLE IF NOT EXISTS ""CreatedAccountHistories"" (
+                    ""Id"" INTEGER NOT NULL CONSTRAINT ""PK_CreatedAccountHistories"" PRIMARY KEY AUTOINCREMENT,
+                    ""UserId"" INTEGER NOT NULL,
+                    ""JobId"" INTEGER NULL,
+                    ""Sites"" TEXT NOT NULL,
+                    ""Username"" TEXT NOT NULL,
+                    ""Password"" TEXT NOT NULL,
+                    ""FullName"" TEXT NOT NULL,
+                    ""PhoneNumber"" TEXT NOT NULL,
+                    ""BankName"" TEXT NOT NULL,
+                    ""BankCode"" TEXT NOT NULL,
+                    ""AccountNumber"" TEXT NOT NULL,
+                    ""Level2Password"" TEXT NOT NULL,
+                    ""CreatedAt"" TEXT NOT NULL,
+                    CONSTRAINT ""FK_CreatedAccountHistories_Users_UserId""
+                        FOREIGN KEY (""UserId"") REFERENCES ""Users"" (""Id"") ON DELETE CASCADE,
+                    CONSTRAINT ""FK_CreatedAccountHistories_Jobs_JobId""
+                        FOREIGN KEY (""JobId"") REFERENCES ""Jobs"" (""Id"") ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS ""IX_CreatedAccountHistories_UserId""
+                    ON ""CreatedAccountHistories"" (""UserId"");
+                CREATE INDEX IF NOT EXISTS ""IX_CreatedAccountHistories_JobId""
+                    ON ""CreatedAccountHistories"" (""JobId"");
+
                 CREATE TABLE IF NOT EXISTS ""SePayWebhookTransactions"" (
                     ""Id"" INTEGER NOT NULL CONSTRAINT ""PK_SePayWebhookTransactions"" PRIMARY KEY AUTOINCREMENT,
                     ""SePayTransactionId"" INTEGER NOT NULL,
@@ -205,6 +229,7 @@ public sealed class AppDbContext : DbContext
     public DbSet<User> Users => Set<User>();
     public DbSet<Transaction> Transactions => Set<Transaction>();
     public DbSet<Job> Jobs => Set<Job>();
+    public DbSet<CreatedAccountHistory> CreatedAccountHistories => Set<CreatedAccountHistory>();
     public DbSet<ProxyPackage> ProxyPackages => Set<ProxyPackage>();
     public DbSet<SePayWebhookTransaction> SePayWebhookTransactions => Set<SePayWebhookTransaction>();
     public DbSet<SePayPaymentRequest> SePayPaymentRequests => Set<SePayPaymentRequest>();
@@ -256,6 +281,23 @@ public sealed class AppDbContext : DbContext
                 .WithMany(p => p.Jobs)
                 .HasForeignKey(d => d.UserId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        modelBuilder.Entity<CreatedAccountHistory>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => e.UserId);
+            entity.HasIndex(e => e.JobId);
+
+            entity.HasOne(d => d.User)
+                .WithMany()
+                .HasForeignKey(d => d.UserId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(d => d.Job)
+                .WithMany()
+                .HasForeignKey(d => d.JobId)
+                .OnDelete(DeleteBehavior.SetNull);
         });
 
         modelBuilder.Entity<SePayWebhookTransaction>(entity =>

@@ -10,6 +10,11 @@ public static class ResultWriter
 
     public static void AppendSuccess(AccountModel account, TargetSite site)
     {
+        AppendRegisteredAccount(account, site);
+    }
+
+    public static void AppendRegisteredAccount(AccountModel account, TargetSite site)
+    {
         var outputPath = RuntimePaths.SuccessPath;
         var line = $"{site}|{account.GetUsername(site)}|{account.GetPassword(site)}|{account.FullName}|{account.AccountNumber}|{account.Level2Password}|";
 

@@ -76,6 +76,12 @@ public sealed class JobWorkerService : BackgroundService
                 {
                     try
                     {
+                        MarkUnfinishedSitesFailed(
+                            pendingJob,
+                            "Application shutdown interrupted this queued job.");
+                        using var refundTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+                        await RefundFailedSitesAsync(pendingJob, refundTimeout.Token);
+
                         using var notificationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
                         await _resultSender.JobCompletedAsync(
                             pendingJob,
@@ -223,6 +229,11 @@ public sealed class JobWorkerService : BackgroundService
                     job.Account.Username);
             }
 
+            using (var refundTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10)))
+            {
+                await RefundFailedSitesAsync(job, refundTimeout.Token);
+            }
+
             try
             {
                 using var notificationTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
@@ -251,6 +262,69 @@ public sealed class JobWorkerService : BackgroundService
                      siteRun.Status is not AccountStatus.Success and not AccountStatus.Failed))
         {
             AutomationUi.SetSiteStatus(job.Account, siteRun, AccountStatus.Failed, message);
+        }
+    }
+
+    private async Task RefundFailedSitesAsync(
+        RegistrationJob job,
+        CancellationToken cancellationToken)
+    {
+        if (job.RegistrationPricePerSite <= 0m
+            || string.IsNullOrWhiteSpace(job.ChargeReferenceId))
+        {
+            return;
+        }
+
+        var failedSites = job.Account.SiteRuns
+            .Where(siteRun => siteRun.IsSelected && siteRun.Status != AccountStatus.Success)
+            .Select(siteRun => siteRun.Site.ToString())
+            .ToArray();
+        if (failedSites.Length == 0
+            || Interlocked.Exchange(ref job.RefundClaimed, 1) != 0)
+        {
+            return;
+        }
+
+        try
+        {
+            var refundAmount = failedSites.Length * job.RegistrationPricePerSite;
+            using var scope = _scopeFactory.CreateScope();
+            var userService = scope.ServiceProvider.GetRequiredService<IUserService>();
+            var refunded = await userService.AddBalanceAsync(
+                job.ChatId,
+                refundAmount,
+                $"Hoàn tiền {failedSites.Length:N0} site đăng ký thất bại - {string.Join(", ", failedSites)}",
+                $"REG-REFUND-{job.Id:N}",
+                cancellationToken);
+            if (!refunded)
+            {
+                Interlocked.Exchange(ref job.RefundClaimed, 0);
+                _logger.LogError(
+                    "Could not refund failed registration sites. JobId={JobId}, ChatId={ChatId}, Amount={Amount}",
+                    job.Id,
+                    job.ChatId,
+                    refundAmount);
+                return;
+            }
+
+            job.RefundedAmount = refundAmount;
+            job.RefundedSiteCount = failedSites.Length;
+            job.RefundedSites = string.Join(", ", failedSites);
+            _logger.LogInformation(
+                "Refunded failed registration sites. JobId={JobId}, ChatId={ChatId}, Sites={Sites}, Amount={Amount}",
+                job.Id,
+                job.ChatId,
+                job.RefundedSites,
+                refundAmount);
+        }
+        catch (Exception exception)
+        {
+            Interlocked.Exchange(ref job.RefundClaimed, 0);
+            _logger.LogError(
+                exception,
+                "Failed to refund registration sites. JobId={JobId}, ChatId={ChatId}",
+                job.Id,
+                job.ChatId);
         }
     }
 
@@ -296,6 +370,31 @@ public sealed class JobWorkerService : BackgroundService
                 dbJob.Status = status == RegistrationJobStatus.Success ? "Success" : "Failed";
                 dbJob.EndTime = DateTime.UtcNow;
                 dbJob.Logs = errorMessage ?? job.Account.SiteLogText ?? "Hoàn thành thành công";
+
+                var successfulSites = job.Account.SiteRuns
+                    .Where(siteRun => siteRun.IsSelected && siteRun.Status == AccountStatus.Success)
+                    .Select(siteRun => siteRun.Site.ToString())
+                    .ToArray();
+                if (successfulSites.Length > 0
+                    && !await db.CreatedAccountHistories.AnyAsync(history => history.JobId == dbJob.Id))
+                {
+                    db.CreatedAccountHistories.Add(new CreatedAccountHistory
+                    {
+                        UserId = dbJob.UserId,
+                        JobId = dbJob.Id,
+                        Sites = string.Join(", ", successfulSites),
+                        Username = job.Account.Username,
+                        Password = job.Account.Password,
+                        FullName = job.Account.FullName,
+                        PhoneNumber = job.Account.PhoneNumber,
+                        BankName = job.Account.BankName,
+                        BankCode = job.Account.BankCode,
+                        AccountNumber = job.Account.AccountNumber,
+                        Level2Password = job.Account.Level2Password,
+                        CreatedAt = DateTime.UtcNow
+                    });
+                }
+
                 await db.SaveChangesAsync();
             }
         }

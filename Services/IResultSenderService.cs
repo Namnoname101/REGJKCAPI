@@ -9,6 +9,8 @@ public interface IResultSenderService
         AccountModel account,
         bool isBulk,
         Guid batchId,
+        decimal registrationPricePerSite,
+        string chargeReferenceId,
         CancellationToken cancellationToken);
 
     Task JobStartedAsync(RegistrationJob job, CancellationToken cancellationToken);

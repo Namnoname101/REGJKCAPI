@@ -58,6 +58,36 @@ public static class DirectRegistrationWorkflow
     public static bool IsSupported(TargetSite site) =>
         site == TargetSite.GG88 || GetProfile(site) is not null;
 
+    internal static async Task<DirectGeetestChallenge?> TryAcquireGeetestChallengeAsync(
+        HttpClient httpClient,
+        TargetSite site,
+        ProxyConfiguration? proxyConfiguration,
+        CaptchaSolverOptions? captchaSolverOptions,
+        IGeetestBrowserTokenService? browserGeetestTokenService,
+        CancellationToken cancellationToken)
+    {
+        var profile = GetProfile(site);
+        if (profile is null || !profile.UsesGeetestCaptcha)
+        {
+            return null;
+        }
+
+        var token = await GetGeetestValidateV4Async(
+                httpClient,
+                profile,
+                proxyConfiguration,
+                captchaSolverOptions,
+                browserGeetestTokenService,
+                cancellationToken)
+            .ConfigureAwait(false);
+        return token is null
+            ? null
+            : new DirectGeetestChallenge(
+                token.Value,
+                token.Provider,
+                token.ElapsedMilliseconds);
+    }
+
     public static async Task<DirectRegistrationOutcome> TryRegisterAsync(
         AccountModel account,
         TargetSite site,
@@ -1699,3 +1729,8 @@ internal sealed record DirectEncryptedPayload(
     string RsaKey,
     string Rsa,
     string Des);
+
+internal sealed record DirectGeetestChallenge(
+    JsonElement Value,
+    string Provider,
+    long ElapsedMilliseconds);

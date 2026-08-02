@@ -63,7 +63,7 @@ public static class ProxyConnectivityVerifier
 
                 using var httpClient = new HttpClient(handler)
                 {
-                    Timeout = TimeSpan.FromSeconds(10)
+                    Timeout = TimeSpan.FromSeconds(5)
                 };
 
                 using var response = await httpClient

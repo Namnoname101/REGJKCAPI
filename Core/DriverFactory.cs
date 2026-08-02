@@ -133,6 +133,7 @@ public static class DriverFactory
                 {
                     ["urls"] = new[]
                     {
+                        "*.woff", "*.woff2", "*.ttf", "*.otf",
                         "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
                         "*google-analytics.com/*", "*googletagmanager.com/*",
                         "*doubleclick.net/*", "*facebook.net/tr/*"
@@ -265,6 +266,7 @@ public static class DriverFactory
                               || site is TargetSite.LLWIN or TargetSite.GG88 or TargetSite.XX88
                 ? new[]
                 {
+                    "*.woff", "*.woff2", "*.ttf", "*.otf",
                     "*.mp4", "*.webm", "*.avi", "*.mov", "*.mp3", "*.wav",
                     "*google-analytics.com/*", "*googletagmanager.com/*",
                     "*doubleclick.net/*", "*facebook.net/tr/*"
